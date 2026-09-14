@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Web Shell</title>
+
+  <!-- xterm.js -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <!-- 登录面板 -->
+  <div id="login-panel">
+    <form id="login-form">
+      <h1>Web Shell</h1>
+      <label for="username">用户名</label>
+      <input id="username" name="username" type="text" autocomplete="username"
+             placeholder="请输入账号名或邮箱" autofocus required>
+      <label for="password">密码</label>
+      <input id="password" name="password" type="password" autocomplete="current-password"
+             placeholder="请输入 AD 密码" required>
+      <button type="submit">登录</button>
+      <div id="login-error"></div>
+    </form>
+  </div>
+
+  <!-- 模式选择面板：登录成功后选择打开 bash 还是 opencode -->
+  <div id="mode-panel" style="display:none;">
+    <div id="mode-box">
+      <h1>选择会话模式</h1>
+      <p id="mode-user"></p>
+      <button type="button" id="btn-bash">打开 Bash 终端</button>
+      <button type="button" id="btn-opencode">打开 OpenCode</button>
+    </div>
+  </div>
+
+  <!-- 终端工具条 + 终端容器 -->
+  <div id="term-wrap" style="display:none;">
+    <div id="terminal-toolbar">
+      <span id="toolbar-title">Web Shell</span>
+      <span id="toolbar-welcome">欢迎使用 Web Shell</span>
+      <div id="font-controls">
+        <button type="button" id="btn-upload" title="上传文件到当前终端目录">上传</button>
+        <input type="file" id="file-input" style="display:none;">
+        <button type="button" id="btn-font-minus" title="减小字体">A-</button>
+        <span id="font-size-label">14px</span>
+        <button type="button" id="btn-font-plus" title="增大字体">A+</button>
+        <select id="theme-select" title="选择终端主题">
+          <option value="vscode-dark">VS Code Dark</option>
+          <option value="dracula">Dracula</option>
+          <option value="monokai">Monokai</option>
+          <option value="nord">Nord</option>
+          <option value="solarized-dark">Solarized Dark</option>
+          <option value="one-dark">One Dark</option>
+          <option value="tokyo-night">Tokyo Night</option>
+          <option value="github-light">GitHub Light</option>
+        </select>
+      </div>
+    </div>
+    <div id="terminal"></div>
+  </div>
+
+  <!-- 通用消息弹窗（div，非浏览器 alert） -->
+  <div id="modal-overlay" style="display:none;">
+    <div id="modal-box">
+      <div id="modal-message"></div>
+      <button type="button" id="modal-ok">确定</button>
+    </div>
+  </div>
+
+  <!-- 上传进度弹窗 -->
+  <div id="upload-overlay" style="display:none;">
+    <div id="upload-box">
+      <div id="upload-title">正在上传...</div>
+      <div id="upload-filename"></div>
+      <div id="upload-bar-wrap">
+        <div id="upload-bar"></div>
+      </div>
+      <div id="upload-percent">0%</div>
+      <div id="upload-actions">
+        <button type="button" id="upload-cancel">取消上传</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- xterm.js core -->
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+  <!-- xterm.js fit addon -->
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+
+  <!-- 本地前端逻辑 -->
+  <script src="/static/app.js"></script>
+</body>
+</html>

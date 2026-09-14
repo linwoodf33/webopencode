@@ -1,0 +1,385 @@
+/* 页面样式：全屏深色终端风格 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  background-color: #1e1e1e;
+  overflow: hidden;
+  font-family: "Menlo", "Consolas", "Monaco", "Courier New", monospace;
+}
+
+#terminal {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  padding: 8px;
+  background-color: #1e1e1e;
+  overflow: hidden;
+}
+
+/* 终端包装容器：工具条 + 终端，占满全屏，纵向排列 */
+#term-wrap {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  background-color: #1e1e1e;
+}
+
+/* 终端工具条 */
+#terminal-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: relative;
+  height: 36px;
+  flex-shrink: 0;
+  padding: 0 12px;
+  background: #252526;
+  border-bottom: 1px solid #3c3c3c;
+}
+
+#terminal-toolbar #toolbar-title {
+  color: #4fc1ff;
+  font-size: 13px;
+  letter-spacing: 1px;
+}
+
+/* 居中的欢迎词 */
+#terminal-toolbar #toolbar-welcome {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  color: #f0f0f0;
+  font-size: 13px;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+
+#terminal-toolbar #font-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#terminal-toolbar #font-controls button {
+  padding: 3px 10px;
+  background: #2f6f9f;
+  border: none;
+  border-radius: 3px;
+  color: #fff;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#terminal-toolbar #font-controls button:hover {
+  background: #3a83ba;
+}
+
+/* 上传按钮（与字号/主题控件区分开） */
+#terminal-toolbar #font-controls #btn-upload {
+  background: #2e7d5b;
+  margin-right: 2px;
+}
+
+#terminal-toolbar #font-controls #btn-upload:hover {
+  background: #39986f;
+}
+
+#terminal-toolbar #font-controls #font-size-label {
+  min-width: 44px;
+  text-align: center;
+  color: #f0f0f0;
+  font-size: 12px;
+}
+
+#terminal-toolbar #font-controls #theme-select {
+  margin-left: 6px;
+  padding: 3px 8px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #f0f0f0;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  outline: none;
+}
+
+#terminal-toolbar #font-controls #theme-select:focus {
+  border-color: #4fc1ff;
+}
+
+#terminal-toolbar #font-controls #theme-select option {
+  background: #1e1e1e;
+  color: #f0f0f0;
+}
+
+/* 让 xterm 容器占满 #terminal */
+#terminal .xterm {
+  height: 100%;
+}
+
+/* 登录面板 */
+#login-panel {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at 50% 30%, #2a2a2a 0%, #1e1e1e 70%);
+}
+
+#login-panel form {
+  width: 320px;
+  padding: 32px 28px;
+  background: #252526;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+}
+
+#login-panel h1 {
+  font-size: 20px;
+  color: #4fc1ff;
+  margin-bottom: 24px;
+  text-align: center;
+  letter-spacing: 1px;
+}
+
+#login-panel label {
+  display: block;
+  color: #a0a0a0;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+#login-panel input[type="text"],
+#login-panel input[type="password"] {
+  width: 100%;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  color: #f0f0f0;
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+}
+
+#login-panel input[type="text"]:focus,
+#login-panel input[type="password"]:focus {
+  border-color: #4fc1ff;
+}
+
+#login-panel button {
+  width: 100%;
+  padding: 10px 12px;
+  background: #2f6f9f;
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#login-panel button:hover {
+  background: #3a83ba;
+}
+
+#login-error {
+  margin-top: 14px;
+  min-height: 18px;
+  color: #ff6b6b;
+  font-size: 13px;
+  text-align: center;
+  word-break: break-all;
+}
+
+/* 模式选择面板 */
+#mode-panel {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at 50% 30%, #2a2a2a 0%, #1e1e1e 70%);
+}
+
+#mode-panel #mode-box {
+  width: 360px;
+  padding: 32px 28px;
+  background: #252526;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  text-align: center;
+}
+
+#mode-panel h1 {
+  font-size: 20px;
+  color: #4fc1ff;
+  margin-bottom: 16px;
+  letter-spacing: 1px;
+}
+
+#mode-panel #mode-user {
+  color: #a0a0a0;
+  font-size: 13px;
+  margin-bottom: 20px;
+}
+
+#mode-panel button {
+  display: block;
+  width: 100%;
+  padding: 12px 12px;
+  margin-bottom: 12px;
+  background: #2f6f9f;
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#mode-panel button:last-child {
+  margin-bottom: 0;
+}
+
+#mode-panel button:hover {
+  background: #3a83ba;
+}
+
+/* 通用消息弹窗（div，替代浏览器 alert） */
+#modal-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 1000;
+}
+
+#modal-box {
+  width: 380px;
+  max-width: 90%;
+  padding: 24px 24px 20px;
+  background: #252526;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.6);
+  text-align: center;
+}
+
+#modal-message {
+  color: #f0f0f0;
+  font-size: 14px;
+  line-height: 1.6;
+  word-break: break-all;
+  margin-bottom: 20px;
+}
+
+#modal-box #modal-ok {
+  width: 120px;
+  padding: 8px 12px;
+  background: #2f6f9f;
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#modal-box #modal-ok:hover {
+  background: #3a83ba;
+}
+
+/* 上传进度弹窗 */
+#upload-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 1000;
+}
+
+#upload-box {
+  width: 420px;
+  max-width: 90%;
+  padding: 24px;
+  background: #252526;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.6);
+}
+
+#upload-title {
+  color: #4fc1ff;
+  font-size: 15px;
+  margin-bottom: 6px;
+}
+
+#upload-filename {
+  color: #a0a0a0;
+  font-size: 13px;
+  word-break: break-all;
+  margin-bottom: 16px;
+}
+
+#upload-bar-wrap {
+  width: 100%;
+  height: 12px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+#upload-bar {
+  width: 0%;
+  height: 100%;
+  background: #2e7d5b;
+  transition: width 0.2s ease;
+}
+
+#upload-percent {
+  margin-top: 10px;
+  color: #f0f0f0;
+  font-size: 13px;
+  text-align: right;
+}
+
+#upload-actions {
+  margin-top: 18px;
+  text-align: center;
+}
+
+#upload-actions #upload-cancel {
+  padding: 8px 24px;
+  background: #3c3c3c;
+  border: 1px solid #4a4a4a;
+  border-radius: 4px;
+  color: #f0f0f0;
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#upload-actions #upload-cancel:hover {
+  background: #4a4a4a;
+}

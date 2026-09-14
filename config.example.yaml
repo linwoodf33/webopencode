@@ -1,0 +1,40 @@
+# Web Shell 配置文件（唯一配置源）
+# 复制为 config.yaml 后按实际环境修改。
+# 最终部署文件由编排者负责生成，本文件仅作示例与格式说明。
+
+# 服务监听地址与端口（host:port），如 "0.0.0.0:8080" 或 ":8080"。
+# 留空则走默认 ":8080"；若显式设置环境变量 PORT，则优先于此。
+listen: "0.0.0.0:8080"
+
+ad:
+  # LDAPS 服务器地址 host:port（请替换为实际地址）
+  server: "ldaps.example.com:636"
+  # manager 账号 DN（用于目录查询 / 搜索用户 DN）
+  manager_dn: "MANAGER@DOMAIN"
+  # manager 账号密码
+  manager_password: "CHANGE_ME"
+  # 目录搜索基准 DN
+  search_dn: "DC=example,DC=com"
+  # 是否跳过 TLS 证书校验（默认 true）
+  tls_insecure: true
+  # AD 连接/操作超时（秒），0 或负数走默认 5
+  timeout: 5
+
+# 是否要求用户输入 AD 密码进行强认证
+# true：manager 搜索取 DN 后用「用户 DN + 密码」bind 校验（强认证）
+# false：退回目录查询模式（只查目录存在，不校验用户密码）
+require_password: true
+
+# 一次性 token 有效期（秒），0 或负数走默认 300
+token_ttl: 300
+
+# opencode 模式：登录后是否直接进入 opencode TUI（而非 bash）
+# enabled: true 进入 opencode；false（缺省）退回 bash
+# path: opencode 可执行文件绝对路径（缺省给默认值）
+# sync_from: opencode 共享配置源目录（含 skills/ 与 opencode.jsonc），缺省给默认值
+# overwrite: true 全量覆盖目标 opencode.jsonc；false 仅在目标不存在时复制
+opencode:
+  enabled: false
+  path: "/opt/opencode/bin/opencode"
+  sync_from: "/opt/opencode-config"
+  overwrite: true

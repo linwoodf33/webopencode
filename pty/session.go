@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -105,7 +107,7 @@ func startWithPty(cmd *exec.Cmd) (*os.File, error) {
 //
 // username 与 homeDir 必须由调用方完成系统存在性校验；若为空返回错误。
 func NewSessionForUser(username, homeDir string) (*Session, error) {
-	return NewSessionForUserMode(username, homeDir, nil)
+	return NewSessionForUserMode(username, homeDir, nil, nil, "")
 }
 
 // NewSessionForUserMode 以指定 Linux 用户启动一个 pty 会话。
@@ -120,8 +122,12 @@ func NewSessionForUser(username, homeDir string) (*Session, error) {
 // 启动 opencode TUI（以登录用户身份运行、工作目录为用户家目录）。外层仍是 bash，
 // 但 opencode 退出后 bash -c 即结束，从而完全退出登录会话（不退回 bash）。
 //
+// sandboxCfg 非 nil 且 Enabled == true 时，改为经 setuid-root 的 sandbox-init
+// 启动 Linux 用户命名空间沙箱（见下）。sandboxCfg 为 nil / 未启用时，保持上述
+// 传统 sudo 路径，零回归。sessionID 用于沙箱 cgroup 命名，仅在沙箱模式下使用。
+//
 // username 与 homeDir 必须由调用方完成系统存在性校验；若为空返回错误。
-func NewSessionForUserMode(username, homeDir string, opencode *auth.OpencodeConfig) (*Session, error) {
+func NewSessionForUserMode(username, homeDir string, opencode *auth.OpencodeConfig, sandboxCfg *auth.SandboxConfig, sessionID string) (*Session, error) {
 	if username == "" {
 		return nil, errors.New("empty username")
 	}
@@ -132,6 +138,11 @@ func NewSessionForUserMode(username, homeDir string, opencode *auth.OpencodeConf
 	sudoPath, err := exec.LookPath("sudo")
 	if err != nil {
 		return nil, errors.New("cannot find sudo: " + err.Error())
+	}
+
+	// 沙箱模式：经 sandbox-init 启动用户命名空间沙箱。
+	if sandboxCfg != nil && sandboxCfg.Enabled {
+		return newSandboxSession(username, homeDir, opencode, sandboxCfg, sessionID, sudoPath)
 	}
 
 	// 构造 sudo 命令参数。
@@ -193,7 +204,120 @@ func NewSessionForUserMode(username, homeDir string, opencode *auth.OpencodeConf
 	}, nil
 }
 
-// syncConfigCommand 构造「以目标用户身份同步 opencode 配置」的 bash -c 命令字符串。
+// newSandboxSession 经 setuid-root 的 sandbox-init 启动 Linux 用户命名空间沙箱。
+//
+// 命令形态（服务进程 ease 仍以普通用户运行，经 `sudo -n -u root` 短暂提权
+// 启动 sandbox-init；sandbox-init 内部解析后 setuid 回真实 UID 并降权）：
+//
+//	/usr/bin/sudo -n -u root <InitPath> \
+//	    --uid <uid> --gid <gid> --home <homeDir> \
+//	    --session <sessionID> --program <bash|opencode> \
+//	    [--opencode-path <path>] --rootfs <rootfs> \
+//	    --network <network> --memory <memory> --cpu <cpu> --pids <pids> \
+//	    --tmp-size <tmp> --nofile <nofile> --core-dump <bool> --max-fsize <fsize> \
+//	    --proc-hidepid <bool> --cgroup-root <cgroupRoot>
+//
+// sessionID 与 cgroup 会话名一致（由调用方 ws.go 生成并传入），保证可追溯。
+// username/homeDir 必须已完成系统存在性校验。
+func newSandboxSession(username, homeDir string, opencode *auth.OpencodeConfig, sandboxCfg *auth.SandboxConfig, sessionID string, sudoPath string) (*Session, error) {
+	if sandboxCfg == nil {
+		return nil, errors.New("sandbox config is nil")
+	}
+	if !sandboxCfg.Enabled {
+		return nil, errors.New("sandbox not enabled")
+	}
+	if sessionID == "" {
+		return nil, errors.New("empty sessionID")
+	}
+
+	// 取真实用户数字 UID/GID。
+	u, err := user.Lookup(username)
+	if err != nil {
+		return nil, errors.New("user lookup failed: " + err.Error())
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return nil, errors.New("invalid uid: " + err.Error())
+	}
+	gid, err := strconv.Atoi(u.Gid)
+	if err != nil {
+		return nil, errors.New("invalid gid: " + err.Error())
+	}
+
+	program := "bash"
+	args := []string{
+		"--uid", strconv.Itoa(uid),
+		"--gid", strconv.Itoa(gid),
+		"--home", homeDir,
+		"--session", sessionID,
+	}
+	if opencode != nil && opencode.Enabled {
+		program = "opencode"
+		args = append(args, "--program", "opencode", "--opencode-path", opencode.Path)
+	} else {
+		args = append(args, "--program", "bash")
+	}
+	args = append(args,
+		"--rootfs", sandboxCfg.RootfsPath,
+		"--network", sandboxCfg.NetworkMode(),
+		"--tmp-size", sandboxCfg.TmpSize,
+		"--nofile", strconv.Itoa(sandboxCfg.NoFileLimit),
+		"--core-dump="+strconv.FormatBool(sandboxCfg.CoreDump),
+		"--max-fsize", sandboxCfg.MaxFsize,
+		"--proc-hidepid="+strconv.FormatBool(sandboxCfg.ProcHidepidEnabled()),
+		"--cgroup-root", sandboxCfg.CgroupRoot,
+	)
+	if sandboxCfg.MemoryMax != "" {
+		args = append(args, "--memory", sandboxCfg.MemoryMax)
+	}
+	if sandboxCfg.CPUQuota != "" {
+		args = append(args, "--cpu", sandboxCfg.CPUQuota)
+	}
+	if sandboxCfg.PidsMax > 0 {
+		args = append(args, "--pids", strconv.Itoa(sandboxCfg.PidsMax))
+	}
+	if !sandboxCfg.SeccompEnabled() {
+		args = append(args, "--seccomp=false")
+	} else {
+		args = append(args, "--seccomp=true")
+	}
+	if sandboxCfg.BindHosts {
+		args = append(args, "--bind-hosts")
+	}
+	for _, m := range sandboxCfg.BindMounts {
+		args = append(args, "--bind-mount", m.Source, "--bind-mount-target", m.Target)
+	}
+
+	// sudo -n -u root <InitPath> ...
+	cmd := exec.Command(sudoPath, append([]string{"-n", "-u", "root", sandboxCfg.InitPath}, args...)...)
+	cmd.Dir = "/"
+
+	env := []string{
+		"HOME=" + homeDir,
+		"USER=" + username,
+		"USERNAME=" + username,
+		"LOGNAME=" + username,
+		"TERM=xterm-256color",
+		"COLORTERM=truecolor",
+	}
+	if program == "bash" {
+		env = append(env, "PS1=\\u@\\h:\\w\\$ ")
+	}
+	cmd.Env = append(os.Environ(), env...)
+
+	master, err := startWithPty(cmd)
+	if err != nil {
+		return nil, errors.New("sandbox/sudo/pty.Start failed: " + err.Error())
+	}
+
+	return &Session{
+		master:   master,
+		cmd:      cmd,
+		workDir:  homeDir,
+		username: username,
+	}, nil
+}
+
 // 通过 sudo -u <username> 执行，使复制出的文件自然归目标用户所有（避开服务用户
 // ease 无 chown 权限的问题）。homeDir/syncFrom/opencodePath 均来自系统 user.Lookup
 // 与配置，无注入风险。

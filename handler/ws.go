@@ -28,7 +28,7 @@ var upgrader = websocket.Upgrader{
 //
 // 无论哪种方式，升级为 WebSocket 后都附着（attach）到 hub 中的会话；连接断开
 // （刷新/断线）时仅分离（detach）而不销毁会话，保留 sessionTTL 等待重连。
-func NewWs(authr *auth.Authenticator, opencodeCfg *auth.OpencodeConfig, hub *sessionHub) http.HandlerFunc {
+func NewWs(authr *auth.Authenticator, opencodeCfg *auth.OpencodeConfig, sandboxCfg *auth.SandboxConfig, hub *sessionHub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 1. 尝试恢复已存在的会话（页面刷新后自动重连）。
 		sid := r.URL.Query().Get("session")
@@ -75,7 +75,10 @@ func NewWs(authr *auth.Authenticator, opencodeCfg *auth.OpencodeConfig, hub *ses
 				}
 			}
 
-			sess, serr := pty.NewSessionForUserMode(username, homeDir, effCfg)
+			// 先生成会话 ID（与沙箱 cgroup 命名一致），再创建 pty 会话。
+			sessionID := newSessionID()
+
+			sess, serr := pty.NewSessionForUserMode(username, homeDir, effCfg, sandboxCfg, sessionID)
 			if serr != nil {
 				log.Printf("pty session create failed: %v", serr)
 				payload, _ := protocol.CloseMessage("failed to start shell: " + serr.Error()).Marshal()
@@ -83,7 +86,7 @@ func NewWs(authr *auth.Authenticator, opencodeCfg *auth.OpencodeConfig, hub *ses
 				_ = conn.Close()
 				return
 			}
-			hs = hub.register(username, sess)
+			hs = hub.register(username, sess, sessionID)
 		}
 
 		// 4. 附着到会话：本协程读取客户端输入，pump goroutine 负责输出。

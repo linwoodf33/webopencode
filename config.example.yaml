@@ -38,3 +38,41 @@ opencode:
   path: "/opt/opencode/bin/opencode"
   sync_from: "/opt/opencode-config"
   overwrite: true
+
+# Linux 沙箱（sandbox-init 由 sudoers 以 root 启动，作为唯一提权入口）
+# enabled: true 启用沙箱；false（缺省）退回传统 sudo 切用户模式
+# init_path: sandbox-init 二进制绝对路径（缺省给默认值）
+# rootfs_path: base rootfs 绝对路径（作为只读新根 bind，缺省给默认值）
+# network: none|loopback|full（缺省 none，即无网络）
+# memory_max: cgroup memory.max（如 "512M"），空则不限制
+# cpu_quota: cgroup cpu.max（如 "50000 100000"），空则不限制
+# pids_max: cgroup pids.max，0 不限制
+# tmp_size: /tmp tmpfs 大小（缺省 256M）
+# nofile_limit: RLIMIT_NOFILE（缺省 4096）
+# core_dump: true 允许 core dump；false（缺省）RLIMIT_CORE=0
+# max_fsize: RLIMIT_FSIZE（缺省 1G）
+# seccomp: true（缺省）安装 seccomp 黑名单；false 关闭
+# proc_hidepid: true（缺省）以 hidepid=2 挂载 /proc；false 关闭
+# cgroup_root: cgroup v2 根目录（缺省给默认值）
+sandbox:
+  enabled: false
+  init_path: "/opt/webshell_sandbox/sandbox-init"
+  rootfs_path: "/opt/runner/rootfs/base"
+  network: "none"
+  tmp_size: "256M"
+  nofile_limit: 4096
+  core_dump: false
+  max_fsize: "1G"
+  seccomp: true
+  proc_hidepid: true
+  cgroup_root: "/sys/fs/cgroup/webshell_sandbox"
+  # bind 宿主已挂载路径（含 NFS 挂载点）到沙箱内路径
+  # 简单形式：字符串列表，source 与 target 相同（自动匹配宿主已挂载路径）
+  # 亦兼容对象形式：- {source: "/easeshare/SH/Method2", target: "/easeshare/SH/Method2"}
+  #   （对象形式用于 source 与 target 不同的场景，例如 target 指定沙箱内挂载点）
+  bind_mounts:
+    - "/easeshare/SH/Method2"
+    - "/easeshare/SIMU3/Sys_Run"
+  # 映射宿主机 /etc/hosts 到沙箱（解决沙箱内主机名解析）
+  bind_hosts: true
+

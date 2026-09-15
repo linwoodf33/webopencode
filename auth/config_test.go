@@ -191,3 +191,196 @@ func TestLoadConfigFileNotFound(t *testing.T) {
 		t.Errorf("expected os.ErrNotExist, got %v", err)
 	}
 }
+
+func TestLoadConfigSandboxBindMounts(t *testing.T) {
+	// sandbox 启用时解析 bind_hosts / bind_mounts 配置。
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+sandbox:
+  enabled: true
+  bind_hosts: true
+  bind_mounts:
+    - source: "/easeshare/SH/Method2"
+      target: "/easeshare/SH/Method2"
+    - source: "/easeshare/SH/Method1"
+      target: "/srv/share/Method1"
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.Sandbox.Enabled {
+		t.Error("sandbox.enabled should be true")
+	}
+	if !cfg.Sandbox.BindHosts {
+		t.Error("sandbox.bind_hosts should be true")
+	}
+	if len(cfg.Sandbox.BindMounts) != 2 {
+		t.Fatalf("sandbox.bind_mounts len = %d, want 2", len(cfg.Sandbox.BindMounts))
+	}
+	if cfg.Sandbox.BindMounts[0].Source != "/easeshare/SH/Method2" {
+		t.Errorf("bind_mounts[0].source = %q", cfg.Sandbox.BindMounts[0].Source)
+	}
+	if cfg.Sandbox.BindMounts[0].Target != "/easeshare/SH/Method2" {
+		t.Errorf("bind_mounts[0].target = %q", cfg.Sandbox.BindMounts[0].Target)
+	}
+	if cfg.Sandbox.BindMounts[1].Source != "/easeshare/SH/Method1" {
+		t.Errorf("bind_mounts[1].source = %q", cfg.Sandbox.BindMounts[1].Source)
+	}
+	if cfg.Sandbox.BindMounts[1].Target != "/srv/share/Method1" {
+		t.Errorf("bind_mounts[1].target = %q", cfg.Sandbox.BindMounts[1].Target)
+	}
+}
+
+func TestLoadConfigSandboxBindMountsSimpleStrings(t *testing.T) {
+	// 字符串形式：source == target == 该路径。
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+sandbox:
+  enabled: true
+  bind_mounts:
+    - "/easeshare/SH/Method2"
+    - "/easeshare/SIMU3/Sys_Run"
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Sandbox.BindMounts) != 2 {
+		t.Fatalf("sandbox.bind_mounts len = %d, want 2", len(cfg.Sandbox.BindMounts))
+	}
+	if cfg.Sandbox.BindMounts[0].Source != "/easeshare/SH/Method2" {
+		t.Errorf("bind_mounts[0].source = %q", cfg.Sandbox.BindMounts[0].Source)
+	}
+	if cfg.Sandbox.BindMounts[0].Target != "/easeshare/SH/Method2" {
+		t.Errorf("bind_mounts[0].target = %q", cfg.Sandbox.BindMounts[0].Target)
+	}
+	if cfg.Sandbox.BindMounts[1].Source != "/easeshare/SIMU3/Sys_Run" {
+		t.Errorf("bind_mounts[1].source = %q", cfg.Sandbox.BindMounts[1].Source)
+	}
+	if cfg.Sandbox.BindMounts[1].Target != "/easeshare/SIMU3/Sys_Run" {
+		t.Errorf("bind_mounts[1].target = %q", cfg.Sandbox.BindMounts[1].Target)
+	}
+}
+
+func TestLoadConfigSandboxBindMountsObject(t *testing.T) {
+	// 对象形式（原有）：source / target 可不同。
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+sandbox:
+  enabled: true
+  bind_mounts:
+    - source: "/easeshare/SH/Method1"
+      target: "/srv/share/Method1"
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Sandbox.BindMounts) != 1 {
+		t.Fatalf("sandbox.bind_mounts len = %d, want 1", len(cfg.Sandbox.BindMounts))
+	}
+	if cfg.Sandbox.BindMounts[0].Source != "/easeshare/SH/Method1" {
+		t.Errorf("bind_mounts[0].source = %q", cfg.Sandbox.BindMounts[0].Source)
+	}
+	if cfg.Sandbox.BindMounts[0].Target != "/srv/share/Method1" {
+		t.Errorf("bind_mounts[0].target = %q", cfg.Sandbox.BindMounts[0].Target)
+	}
+}
+
+func TestLoadConfigSandboxBindMountsMixed(t *testing.T) {
+	// 混合形式：字符串与对象形式可在同列表中混用。
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+sandbox:
+  enabled: true
+  bind_mounts:
+    - "/easeshare/SH/Method2"
+    - source: "/easeshare/SH/Method1"
+      target: "/srv/share/Method1"
+    - "/easeshare/SIMU3/Sys_Run"
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Sandbox.BindMounts) != 3 {
+		t.Fatalf("sandbox.bind_mounts len = %d, want 3", len(cfg.Sandbox.BindMounts))
+	}
+	if cfg.Sandbox.BindMounts[0].Source != "/easeshare/SH/Method2" || cfg.Sandbox.BindMounts[0].Target != "/easeshare/SH/Method2" {
+		t.Errorf("bind_mounts[0] = {%q, %q}", cfg.Sandbox.BindMounts[0].Source, cfg.Sandbox.BindMounts[0].Target)
+	}
+	if cfg.Sandbox.BindMounts[1].Source != "/easeshare/SH/Method1" || cfg.Sandbox.BindMounts[1].Target != "/srv/share/Method1" {
+		t.Errorf("bind_mounts[1] = {%q, %q}", cfg.Sandbox.BindMounts[1].Source, cfg.Sandbox.BindMounts[1].Target)
+	}
+	if cfg.Sandbox.BindMounts[2].Source != "/easeshare/SIMU3/Sys_Run" || cfg.Sandbox.BindMounts[2].Target != "/easeshare/SIMU3/Sys_Run" {
+		t.Errorf("bind_mounts[2] = {%q, %q}", cfg.Sandbox.BindMounts[2].Source, cfg.Sandbox.BindMounts[2].Target)
+	}
+}
+
+func TestLoadConfigSandboxBindMountsInvalid(t *testing.T) {
+	// 空字符串路径与不支持的类型（如数字）应解析失败。
+	for _, tc := range []struct {
+		name    string
+		bindYML string
+	}{
+		{name: "empty string", bindYML: `- ""`},
+		{name: "numeric scalar", bindYML: `- 123`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+sandbox:
+  enabled: true
+  bind_mounts:
+`+tc.bindYML+`
+`)
+			if _, err := LoadConfig(path); err == nil {
+				t.Fatalf("expected error for invalid bind mount %q, got nil", tc.bindYML)
+			}
+		})
+	}
+}
+
+func TestLoadConfigSandboxBindDefaults(t *testing.T) {
+	// 未显式设置时 bind_hosts=false、bind_mounts 为空。
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+sandbox:
+  enabled: true
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Sandbox.BindHosts {
+		t.Error("sandbox.bind_hosts should default to false")
+	}
+	if len(cfg.Sandbox.BindMounts) != 0 {
+		t.Errorf("sandbox.bind_mounts len = %d, want 0", len(cfg.Sandbox.BindMounts))
+	}
+}

@@ -59,7 +59,7 @@ func main() {
 	hub := handler.NewSessionHub()
 
 	// WebSocket 端点（升级前校验一次性 token；或按 sessionID 恢复会话）。
-	http.HandleFunc("/ws", handler.NewWs(authr, &cfg.Opencode, hub))
+	http.HandleFunc("/ws", handler.NewWs(authr, &cfg.Opencode, &cfg.Sandbox, hub))
 
 	// 恢复前探测：GET /api/resume?session=<id>&username=<user>。
 	http.HandleFunc("/api/resume", handler.NewResumeHandler(hub))

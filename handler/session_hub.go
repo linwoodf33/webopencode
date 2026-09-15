@@ -206,11 +206,17 @@ func NewSessionHub() *sessionHub {
 	return h
 }
 
-// register 注册一个新会话并启动其 pump goroutine，返回会话（含生成的 ID）。
-func (h *sessionHub) register(username string, sess *pty.Session) *hubSession {
+// register 注册一个新会话并启动其 pump goroutine，返回会话（含 ID）。
+// 可选参数 id 允许调用方指定会话 ID（用于沙箱 cgroup 命名与 hub 会话 id 一致）；
+// 未传入时内部生成。
+func (h *sessionHub) register(username string, sess *pty.Session, id ...string) *hubSession {
+	sid := newSessionID()
+	if len(id) > 0 && id[0] != "" {
+		sid = id[0]
+	}
 	hs := &hubSession{
 		hub:      h,
-		id:       newSessionID(),
+		id:       sid,
 		username: username,
 		sess:     sess,
 	}

@@ -105,8 +105,8 @@ token_ttl: 300                     # 一次性 token 有效期（秒）
 # opencode 模式：登录后由用户选择进入 opencode TUI 或 bash
 opencode:
   enabled: true                    # true=展示「打开 Bash / 打开 OpenCode」选择面板
-  path: "/opt/opencode/bin/opencode"  # opencode 可执行文件路径
-  sync_from: "/opt/opencode-config"    # 共享配置源目录（含 skills/ 与 opencode.jsonc）
+  path: "/share/apps/.opencode/bin/opencode"  # opencode 可执行文件路径
+  sync_from: "/share/apps/.opencode-config"   # 共享配置源目录（含 skills/ 与 opencode.jsonc）
   overwrite: true                  # 首次初始化时是否覆盖 opencode.jsonc
 
 > **api_key 必须用 `{env:XXX_API_KEY}` 引用**：opencode 配置（`opencode.jsonc`）中的
@@ -146,6 +146,9 @@ sandbox:
   bind_mounts:
     - "/easeshare/SH/Method2"     # 简单形式：source 与 target 相同（自动匹配宿主已挂载路径）
     - "/easeshare/SIMU3/Sys_Run"  # 亦兼容对象形式：{source: "...", target: "..."}
+    # 也可 bind 系统/共享目录：如 /etc/ssl/certs（宿主 CA 证书，沙箱内 HTTPS 必需）、
+    # /share/apps/.opencode 与 /share/apps/.codex-standalone（opencode/codex 二进制版本跟随宿主）
+    - "/etc/ssl/certs"            # 宿主 CA 证书目录（沙箱内 opencode/codex 联网必需）
   bind_hosts: true                # 映射宿主机 /etc/hosts 到沙箱（解决沙箱内主机名解析）
   bind_resolv: true               # 映射宿主机 /etc/resolv.conf 到沙箱（解决沙箱内域名解析）
   # userns_init_path: ""          # userns-init 绝对路径；留空自动推导为 sandbox-init 同目录下的 userns-init
@@ -171,6 +174,9 @@ sandbox:
 - `bind_mounts`：宿主已挂载路径（含 NFS）bind 进沙箱。简单形式字符串列表（source=target）；也可用对象形式 `{source: "...", target: "..."}` 支持 source 与 target 不同。
 - `bind_hosts`：将宿主机 `/etc/hosts` 映射进沙箱，解决沙箱内主机名解析。
 - `bind_resolv`：将宿主机 `/etc/resolv.conf` 映射进沙箱，解决沙箱内域名解析。建议 `network: full`（共享宿主网络栈）时开启，此时宿主 DNS（如 `127.0.0.53` systemd-resolved stub）在沙箱内可达。
+
+**沙箱内 HTTPS 与 CA 证书**：沙箱 rootfs 可能缺少宿主 CA 证书（`/etc/ssl/certs`），会导致沙箱内所有 HTTPS 请求失败——典型现象：codex 报 **"waiting for network"**、curl 报 `(77) error setting certificate file`。修复方式：在 `sandbox.bind_mounts` 中加入 `/etc/ssl/certs`（source=target），把宿主 CA 证书目录 bind 进沙箱。**这是沙箱内 opencode/codex 正常联网的必要配置**，缺省（未 bind）时沙箱内 HTTPS 不可用。
+
 - `userns_init_path`：userns-init 可执行文件绝对路径。**留空（缺省）时自动推导为 sandbox-init 同目录下的 `userns-init`**，无需额外配置；仅在需要将 userns-init 放到其他位置时显式指定。
 - `http_proxy` / `https_proxy`：http/https 代理地址（如 `"http://proxy.example.com:8080"`），非空时注入沙箱进程环境变量（同时设置小写与大写两种形式，如 `http_proxy` / `HTTP_PROXY`）。仅 `network: full` 时沙箱有外部网络，代理才能生效。
 - `no_proxy`：不使用代理的主机/域名列表（逗号分隔，如 `"localhost,127.0.0.1"`），非空时注入沙箱进程环境变量（同时设置 `no_proxy` / `NO_PROXY`）。
@@ -227,6 +233,8 @@ systemctl restart webshell  # 重启
 systemctl status webshell   # 查看状态
 ```
 
+> 上面的单元为通用模板（`/opt/webshell`、端口 8080）；**生产示例**为 `webshell_sandbox_new.service`（`User=ease`、端口 8090、`WorkingDirectory=/opt/webshell_sandbox1`、`CONFIG_PATH=/opt/webshell_sandbox1/config.yaml`、`ExecStart=/opt/webshell_sandbox1/webshell`），具体以部署目录为准。
+
 > 部署新二进制时需先 `systemctl stop webshell`，再替换 `/opt/webshell/webshell`，最后 `systemctl start webshell`（避免 `Text file busy`）。
 
 > 早期曾用 `systemd-run --unit=webshell --collect` 创建 transient 单元（停止后自动清理、重启需重新创建），现已改用上面的持久化单元（`enabled` 开机自启）。
@@ -242,6 +250,29 @@ systemctl status webshell   # 查看状态
 5. **启动验证**：启动 systemd 服务，浏览器 AD 登录后，沙箱内 `id` 应显示真实用户名（uid/gid/补充组与宿主机一致），vim、opencode、NFS bind 路径可用。
 
 > RHEL 差异：需关闭 SELinux、适配 `/usr/lib64` 库路径的 rootfs 脚本、firewalld 放行端口，详见 DEPLOY.md。
+
+## opencode / codex 版本更新
+
+采用**方案 B（bind 方式）**：`/share/apps/.opencode` 与 `/share/apps/.codex-standalone` 已通过 `sandbox.bind_mounts` bind 进沙箱，沙箱内直接读取宿主最新版本，**无需再拷贝进 rootfs**。更新版本只需替换宿主 `/share/apps` 下对应二进制/目录，**新开的沙箱会话即生效**（无需重启服务、无需重建 rootfs）。
+
+```bash
+# opencode：替换宿主二进制（新开沙箱会话生效）
+cp 新版本opencode /share/apps/.opencode/bin/opencode
+chmod 755 /share/apps/.opencode/bin/opencode
+
+# codex：替换 /share/apps/.codex-standalone/ 下内容（codex 为启动脚本 + vendor/ 依赖目录）
+cp -a 新版本codex/. /share/apps/.codex-standalone/
+chmod 755 /share/apps/.codex-standalone/codex
+```
+
+验证（在沙箱会话内执行）：
+
+```bash
+/share/apps/.opencode/bin/opencode --version
+/share/apps/.codex-standalone/codex --version
+```
+
+> **安全注意**：bind 后沙箱内（登录用户身份）对 `/share/apps/.opencode` 与 `/share/apps/.codex-standalone` 可写（未做只读 remount）。实际 codex/opencode 以只读方式执行，被篡改风险低；rootfs 中的旧副本保留作为 fallback 无害。
 
 ## 服务运行用户的系统权限
 
@@ -286,10 +317,12 @@ ease ALL=(root) NOPASSWD: /opt/webshell_sandbox1/sandbox-init
 
 | 路径 | 权限要求 |
 | ---- | -------- |
-| opencode 二进制 `/opt/opencode/bin/opencode` | 所有用户可执行（含服务用户） |
-| 配置源目录 `/opt/opencode-config`（含 `skills/` 与 `opencode.jsonc`） | 服务用户可读（`sync_from` 指向） |
+| opencode 二进制 `/share/apps/.opencode/bin/opencode` | 所有用户可执行（含服务用户） |
+| 配置源目录 `/share/apps/.opencode-config`（含 `skills/` 与 `opencode.jsonc`） | 服务用户可读（`sync_from` 指向） |
 | codex 二进制 `/share/apps/.codex-standalone/codex` | 所有用户可执行（含服务用户） |
 | 配置源目录 `/share/apps/.codex-config`（含 `config.toml`） | 服务用户可读（`sync_from` 指向） |
+
+> `/share/apps/.opencode` 与 `/share/apps/.codex-standalone` 已通过 `sandbox.bind_mounts` bind 进沙箱（方案 B），沙箱内直接读取宿主版本；更新版本见「opencode / codex 版本更新」。
 
 ### 4. 服务用户 shell 说明
 

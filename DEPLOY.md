@@ -102,27 +102,33 @@ chmod +x /opt/webshell_sandbox1/scripts/build_rootfs.sh
 - 脚本会从宿主拷贝 bash/coreutils/gcc/python3/make/vim 及其动态依赖
 - 构建后自动 chroot 测试 bash 可用
 
-### 3. 可选：加入 opencode 二进制到 rootfs
-若需要在沙箱内运行 opencode，需把 opencode 二进制及其依赖拷入 rootfs：
-```bash
-ROOT=/opt/runner/rootfs/base
-mkdir -p $ROOT/share/apps/.opencode/bin
-cp -a /share/apps/.opencode/bin/opencode $ROOT/share/apps/.opencode/bin/
-# 递归拷贝 opencode 的动态库依赖（ldd 逐个拷贝到对应路径）
-```
+### 3. opencode 二进制：推荐 bind 方式（方案 B）
+当前生产推荐**不把 opencode/codex 拷入 rootfs**，而是通过 `config.yaml` 的 `sandbox.bind_mounts`
+把宿主 `/share/apps/.opencode` 与 `/share/apps/.codex-standalone` bind 进沙箱（见「五、配置」）。
+沙箱内直接读取宿主版本，**更新版本只需替换宿主文件，无需重建/拷贝 rootfs**（详见「更新 opencode / codex 版本」）。
 
-### 4. 可选：加入 codex 二进制到 rootfs
-若需要在沙箱内运行 codex，需把 codex 二进制及其依赖拷入 rootfs（路径须与 `config.yaml` 的
-`codex.path` 一致，默认为 `/share/apps/.codex-standalone/codex`）：
-```bash
-ROOT=/opt/runner/rootfs/base
-mkdir -p $ROOT/share/apps/.codex-standalone
-cp -a /share/apps/.codex-standalone/codex $ROOT/share/apps/.codex-standalone/codex
-# 递归拷贝 codex 的动态库依赖（ldd 逐个拷贝到对应路径）
-```
-> codex 的共享配置（`/share/apps/.codex-config/`）**无需** bind 进 rootfs：Web Shell 在登录
-> 时会将其同步到用户 `~/.codex`，而用户家目录已 bind 进沙箱，故沙箱内 `~/.codex/config.toml`
-> 天然可见。
+> **回退方案（非 bind 场景）**：若不便 bind 宿主目录，也可将 opencode 二进制及其动态库依赖拷入 rootfs
+> （路径须与 `config.yaml` 的 `opencode.path` 一致）：
+> ```bash
+> ROOT=/opt/runner/rootfs/base
+> mkdir -p $ROOT/share/apps/.opencode/bin
+> cp -a /share/apps/.opencode/bin/opencode $ROOT/share/apps/.opencode/bin/
+> # 递归拷贝 opencode 的动态库依赖（ldd 逐个拷贝到对应路径）
+> ```
+
+### 4. codex 二进制：推荐 bind 方式（方案 B）
+同样推荐 bind（见上），根目录内不单独拷贝 codex。codex 共享配置（`/share/apps/.codex-config/`）**无需**
+bind 进沙箱：Web Shell 在登录时会将其同步到用户 `~/.codex`，而用户家目录已 bind 进沙箱，故沙箱内
+`~/.codex/config.toml` 天然可见。
+
+> **回退方案（非 bind 场景）**：将 codex 二进制及其依赖拷入 rootfs（路径须与 `config.yaml` 的
+> `codex.path` 一致，默认为 `/share/apps/.codex-standalone/codex`）：
+> ```bash
+> ROOT=/opt/runner/rootfs/base
+> mkdir -p $ROOT/share/apps/.codex-standalone
+> cp -a /share/apps/.codex-standalone/codex $ROOT/share/apps/.codex-standalone/codex
+> # 递归拷贝 codex 的动态库依赖（ldd 逐个拷贝到对应路径）
+> ```
 
 ---
 
@@ -174,7 +180,10 @@ sandbox:
   cgroup_root: "/sys/fs/cgroup/webshell_sandbox"
   bind_mounts:
     - "/easeshare/SH/Method2"          # NFS 挂载点（宿主机须已挂载）
-    - "/share/apps/.opencode-config"    # opencode 共享配置
+    - "/share/apps/.opencode-config"    # opencode 共享配置（skills/ 与 opencode.jsonc）
+    - "/etc/ssl/certs"                  # 宿主 CA 证书目录（沙箱内 HTTPS 必需）
+    - "/share/apps/.opencode"           # opencode 二进制（bind 方式，版本跟随宿主）
+    - "/share/apps/.codex-standalone"   # codex 二进制（bind 方式，版本跟随宿主）
   bind_hosts: true
   bind_resolv: true
   # userns_init_path: ""          # userns-init 绝对路径；留空自动推导为 sandbox-init 同目录下的 userns-init
@@ -196,6 +205,8 @@ chmod 600 /opt/webshell_sandbox1/config.yaml
   - `full`：共享宿主网络（NFS 访问、opencode 联网）
   - `none`/`loopback`：沙箱无外部网络（NFS 将不可访问）
 - `sandbox.enabled=false`：退回传统 sudo 直连（不叠加沙箱隔离）
+- **`/etc/ssl/certs`**：把宿主 CA 证书目录 bind 进沙箱，解决沙箱内 HTTPS 失败（curl 报 `(77) error setting certificate file`、codex 报 "waiting for network"）。**沙箱内 opencode/codex 联网必需**；未 bind 时沙箱 rootfs 缺少 CA 证书，所有 HTTPS 请求都会失败。
+- **`/share/apps/.opencode` 与 `/share/apps/.codex-standalone`**：把宿主 opencode/codex 目录 bind 进沙箱（方案 B），沙箱直接读取宿主版本；更新版本只需替换宿主文件，无需拷贝 rootfs（详见「更新 opencode / codex 版本」）。注意 bind 后沙箱内（登录用户身份）对这些目录**可写**（未做只读 remount），实际以只读方式执行，风险低。
 
 ---
 
@@ -210,12 +221,15 @@ mount -t nfs easemgt:/data/apps /share/apps
 ```
 
 ### 2. opencode 二进制与配置
-- opencode 二进制：`/share/apps/.opencode/bin/opencode`（沙箱内需 rootfs 内可执行）
+- opencode 二进制：`/share/apps/.opencode/bin/opencode`（沙箱内经 bind_mounts 直接读取宿主版本）
 - opencode 共享配置：`/share/apps/.opencode-config`（含 `opencode.jsonc` + `skills/`）
 
 ### 3. codex 二进制与配置
-- codex 二进制：`/share/apps/.codex-standalone/codex`（非沙箱与沙箱均需可执行）
+- codex 二进制：`/share/apps/.codex-standalone/codex`（非沙箱与沙箱均需可执行，沙箱内经 bind_mounts 直接读取宿主版本）
 - codex 共享配置：`/share/apps/.codex-config`（含 `config.toml` 与 `skills/`），登录时同步到用户 `~/.codex`
+
+> 上述 opencode/codex 二进制目录（`/share/apps/.opencode` 与 `/share/apps/.codex-standalone`）通过
+> `bind_mounts` 进入沙箱（方案 B），版本更新见「更新 opencode / codex 版本」。
 
 **codex 配置同步语义（白名单）**：
 - 目标目录为 **`~/.codex`**（注意不是 `~/.config/codex`）；源目录为 `/share/apps/.codex-config/`。
@@ -230,6 +244,33 @@ mount -t nfs easemgt:/data/apps /share/apps
 `env_key = "YANFENG_API_KEY"`），**禁止硬编码 key**。Web Shell 读取该引用，若用户
 `~/.auth.json` 缺失对应 api_key，则在 codex 启动前弹窗补全并注入 codex 进程环境
 （非沙箱 `sudo -E` 透传、沙箱 `.auth.env`）。硬编码 key 无法触发补全机制，且会随配置同步泄露给所有用户。
+
+### 4. 更新 opencode / codex 版本（bind 方式，方案 B）
+
+`/share/apps/.opencode` 与 `/share/apps/.codex-standalone` 已通过 `bind_mounts` bind 进沙箱，
+沙箱内直接读取宿主版本。**更新版本只需替换宿主 `/share/apps` 下对应文件，新开的沙箱会话即生效**
+（无需重启服务、无需重建/拷贝 rootfs）：
+
+```bash
+# opencode：替换宿主二进制
+cp 新版本opencode /share/apps/.opencode/bin/opencode
+chmod 755 /share/apps/.opencode/bin/opencode
+
+# codex：替换 /share/apps/.codex-standalone/ 下内容（codex 为启动脚本 + vendor/ 依赖目录）
+cp -a 新版本codex/. /share/apps/.codex-standalone/
+chmod 755 /share/apps/.codex-standalone/codex
+```
+
+验证（在沙箱会话内执行，应输出对应版本号）：
+
+```bash
+/share/apps/.opencode/bin/opencode --version
+/share/apps/.codex-standalone/codex --version
+```
+
+> **安全提示**：bind 后沙箱内（登录用户身份）对 `/share/apps/.opencode` 与
+> `/share/apps/.codex-standalone` **可写**（未做只读 remount）。实际 codex/opencode 以只读方式执行，
+> 被篡改风险低；rootfs 中的旧副本保留作为 fallback 无害。
 
 ---
 
@@ -319,6 +360,10 @@ sudo -n -u root /opt/webshell_sandbox1/sandbox-init --uid 1000 --gid 1000 \
 - `vim` 可用
 - `ls /share/apps/.opencode-config/` 可见配置
 - NFS bind 路径可见（若配置）
+- **沙箱内 opencode/codex 版本**（bind 方式验证）：`/share/apps/.opencode/bin/opencode --version`、
+  `/share/apps/.codex-standalone/codex --version` 应输出版本号；
+- **HTTPS 可用性**：`curl -sS -o /dev/null -w "%{http_code}\n" <base_url>` 应返回非 `000`
+  （若返回 `000` / curl 报 `(77)`，说明沙箱缺 CA 证书，确认 `bind_mounts` 已含 `/etc/ssl/certs`）。
 
 **codex 验证**（若启用 `codex.enabled: true`）：
 - 登录响应应含 `codex_enabled: true`，前端显示「打开 Codex」按钮；
@@ -363,6 +408,7 @@ systemctl enable webshell-cgroup.service
 | 中文乱码 | 缺 locale | rootfs 拷入 `/usr/lib/locale/locale-archive`，env 设 `LANG=en_US.utf8` |
 | cgroup 目录累积 | 会话清理失败 | 确认最新 userns-init（cleaner 移到根 cgroup + rmdir）|
 | 沙箱提权风险 | 目录属主错误 | `/opt/webshell_sandbox1` 必须 root:root 0755 |
+| codex 报 "waiting for network" / curl 报 `(77) error setting certificate file` | 沙箱缺 CA 证书 | `bind_mounts` 加入 `/etc/ssl/certs` 并重启服务 |
 
 ---
 

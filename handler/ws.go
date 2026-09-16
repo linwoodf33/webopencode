@@ -78,7 +78,29 @@ func NewWs(authr *auth.Authenticator, opencodeCfg *auth.OpencodeConfig, sandboxC
 			// 先生成会话 ID（与沙箱 cgroup 命名一致），再创建 pty 会话。
 			sessionID := newSessionID()
 
-			sess, serr := pty.NewSessionForUserMode(username, homeDir, effCfg, sandboxCfg, sessionID)
+			// opencode 模式：启动前补全 opencode.jsonc 引用的 api_key。
+			// 此时 WebSocket 已 Upgrade、hubSession 尚未创建（readLoop 未启动），
+			// auth flow 直接读写 conn。缺失 key 时下发 auth-request 弹窗等待用户
+			// 输入，用户取消/超时则发送 close 消息并结束会话。
+			var authEnv map[string]string
+			var aerr error
+			if effCfg != nil {
+				authTimeout := defaultAuthTimeout
+				if opencodeCfg != nil && opencodeCfg.AuthTimeout > 0 {
+					authTimeout = time.Duration(opencodeCfg.AuthTimeout) * time.Second
+				}
+				authEnv, aerr = resolveAuthEnv(conn, username, homeDir, effCfg, authTimeout)
+				if aerr != nil {
+					log.Printf("ws: auth env for %q failed: %v", username, aerr)
+					reason := "api key required but canceled or timed out"
+					payload, _ := protocol.CloseMessage(reason).Marshal()
+					_ = conn.WriteMessage(websocket.TextMessage, payload)
+					_ = conn.Close()
+					return
+				}
+			}
+
+			sess, serr := pty.NewSessionForUserMode(username, homeDir, effCfg, sandboxCfg, sessionID, authEnv)
 			if serr != nil {
 				log.Printf("pty session create failed: %v", serr)
 				payload, _ := protocol.CloseMessage("failed to start shell: " + serr.Error()).Marshal()

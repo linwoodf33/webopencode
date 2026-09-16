@@ -69,6 +69,19 @@
     </div>
   </div>
 
+  <!-- API Key 输入弹窗 -->
+  <div id="auth-overlay" style="display:none;">
+    <div id="auth-box">
+      <div id="auth-title">请输入 API Key</div>
+      <p id="auth-hint">以下环境变量在 opencode 配置中被引用，请输入对应的 API Key：</p>
+      <div id="auth-fields"></div>
+      <div id="auth-actions">
+        <button type="button" id="auth-cancel-btn">取消</button>
+        <button type="button" id="auth-ok-btn">确定</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 上传进度弹窗 -->
   <div id="upload-overlay" style="display:none;">
     <div id="upload-box">

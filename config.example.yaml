@@ -33,6 +33,13 @@ token_ttl: 300
 # path: opencode 可执行文件绝对路径（缺省给默认值）
 # sync_from: opencode 共享配置源目录（含 skills/ 与 opencode.jsonc），缺省给默认值
 # overwrite: true 全量覆盖目标 opencode.jsonc；false 仅在目标不存在时复制
+# auth_timeout: 启动前 api_key 补全弹窗的等待超时（秒），0 或缺省走默认 60
+# auth_file: 用户 api_key 存储文件名（位于用户家目录），缺省 ".auth.json"
+#
+# 注意：opencode 配置（opencode.jsonc）中的 api_key 必须用 {env:XXX_API_KEY}
+# 引用环境变量（如 "apiKey": "{env:YANFENG_API_KEY}"）。Web Shell 会读取该引用，
+# 若用户 ~/.auth.json 缺失对应 api_key，则在 opencode 启动前弹窗让用户补全。
+# 硬编码 key 将无法触发本机制，且会随配置同步泄露给所有用户。
 opencode:
   enabled: false
   path: "/opt/opencode/bin/opencode"
@@ -56,7 +63,7 @@ opencode:
 # cgroup_root: cgroup v2 根目录（缺省给默认值）
 sandbox:
   enabled: false
-  init_path: "/opt/webshell_sandbox/sandbox-init"
+  init_path: "/opt/webshell_sandbox_new/sandbox-init"
   rootfs_path: "/opt/runner/rootfs/base"
   network: "none"
   tmp_size: "256M"
@@ -75,4 +82,11 @@ sandbox:
     - "/easeshare/SIMU3/Sys_Run"
   # 映射宿主机 /etc/hosts 到沙箱（解决沙箱内主机名解析）
   bind_hosts: true
+  # 映射宿主机 /etc/resolv.conf 到沙箱（解决沙箱内域名解析；建议 network: full 时开启，
+  # 沙箱共享宿主网络栈，宿主 DNS（如 127.0.0.53 systemd-resolved stub）在沙箱内可达）
+  bind_resolv: true
+  # userns_init_path: ""   # userns-init 绝对路径；留空自动推导为 sandbox-init 同目录下的 userns-init
+  # http_proxy: ""    # http 代理（如 "http://proxy.example.com:8080"），非空时注入沙箱环境变量
+  # https_proxy: ""   # https 代理（如 "http://proxy.example.com:8080"），非空时注入沙箱环境变量
+  # no_proxy: ""      # 不使用代理的主机（如 "localhost,127.0.0.1"），非空时注入沙箱环境变量
 

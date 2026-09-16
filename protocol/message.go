@@ -19,6 +19,12 @@ const (
 	TypeClose MessageType = "close"
 	// TypeSession 服务端 -> 客户端，当前会话标识（用于页面刷新后恢复同一终端）。
 	TypeSession MessageType = "session"
+	// TypeAuthRequest 服务端 -> 客户端，请求用户输入缺失的 api_key（opencode 模式启动前）。
+	TypeAuthRequest MessageType = "auth-request"
+	// TypeAuthResponse 客户端 -> 服务端，返回单个环境变量对应的 api_key。
+	TypeAuthResponse MessageType = "auth-response"
+	// TypeAuthCancel 客户端 -> 服务端，用户取消 api_key 补全流程。
+	TypeAuthCancel MessageType = "auth-cancel"
 )
 
 // SessionData 会话标识数据。
@@ -102,6 +108,52 @@ func CloseMessage(reason string) *Message {
 func SessionMessage(id string) *Message {
 	raw, _ := json.Marshal(SessionData{ID: id})
 	return &Message{Type: TypeSession, Data: raw}
+}
+
+// AuthRequestData auth-request 消息数据：缺失的环境变量名列表与超时秒数。
+type AuthRequestData struct {
+	// EnvVars 缺失的环境变量名列表（有序去重）。
+	EnvVars []string `json:"envVars"`
+	// Timeout 超时秒数（默认 60），客户端用于提示用户。
+	Timeout int `json:"timeout"`
+}
+
+// AuthResponseData auth-response 消息数据：单个环境变量的 api_key。
+type AuthResponseData struct {
+	EnvVar string `json:"envVar"`
+	APIKey string `json:"apiKey"`
+}
+
+// AuthRequestMessage 构造一个 auth-request 消息（请求输入缺失的 api_key）。
+func AuthRequestMessage(envVars []string, timeout int) *Message {
+	raw, _ := json.Marshal(AuthRequestData{EnvVars: envVars, Timeout: timeout})
+	return &Message{Type: TypeAuthRequest, Data: raw}
+}
+
+// ParseAuthRequest 从 Message 的 Data 中解析 auth-request 数据。
+// 解析失败返回 false（调用方应忽略）。
+func (m *Message) ParseAuthRequest() (AuthRequestData, bool) {
+	var d AuthRequestData
+	if len(m.Data) == 0 {
+		return d, false
+	}
+	if err := json.Unmarshal(m.Data, &d); err != nil {
+		return d, false
+	}
+	return d, true
+}
+
+// ParseAuthResponse 从 Message 的 Data 中解析 auth-response 数据。
+// 解析失败返回 false（调用方应忽略）。
+func (m *Message) ParseAuthResponse() (AuthResponseData, bool) {
+	var d AuthResponseData
+	if len(m.Data) == 0 {
+		return d, false
+	}
+	if err := json.Unmarshal(m.Data, &d); err != nil {
+		return d, false
+	}
+	return d, true
 }
 
 // Marshal 序列化消息为 JSON 字节串。

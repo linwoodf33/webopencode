@@ -307,6 +307,114 @@ body {
   background: #3a83ba;
 }
 
+/* API Key 输入弹窗（复用 modal 风格） */
+#auth-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 999; /* 低于普通消息弹窗，便于 authOk 用 showModal 提示校验错误 */
+}
+
+#auth-box {
+  width: 420px;
+  max-width: 90%;
+  padding: 24px 24px 20px;
+  background: #252526;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.6);
+}
+
+#auth-title {
+  color: #4fc1ff;
+  font-size: 15px;
+  margin-bottom: 10px;
+}
+
+#auth-hint {
+  color: #a0a0a0;
+  font-size: 13px;
+  line-height: 1.6;
+  margin-bottom: 14px;
+  word-break: break-all;
+}
+
+/* 每个环境变量一行的 label + password 输入框 */
+#auth-fields {
+  margin-bottom: 16px;
+}
+
+#auth-fields .auth-field {
+  margin-bottom: 12px;
+}
+
+#auth-fields .auth-field:last-child {
+  margin-bottom: 0;
+}
+
+#auth-fields .auth-field label {
+  display: block;
+  color: #f0f0f0;
+  font-size: 13px;
+  margin-bottom: 6px;
+  word-break: break-all;
+}
+
+#auth-fields .auth-field input[type="password"] {
+  width: 100%;
+  padding: 10px 12px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  color: #f0f0f0;
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+}
+
+#auth-fields .auth-field input[type="password"]:focus {
+  border-color: #4fc1ff;
+}
+
+#auth-actions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+}
+
+#auth-actions button {
+  width: 120px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#auth-actions #auth-ok-btn {
+  background: #2f6f9f;
+  border: none;
+  color: #fff;
+}
+
+#auth-actions #auth-ok-btn:hover {
+  background: #3a83ba;
+}
+
+#auth-actions #auth-cancel-btn {
+  background: #3c3c3c;
+  border: 1px solid #4a4a4a;
+  color: #f0f0f0;
+}
+
+#auth-actions #auth-cancel-btn:hover {
+  background: #4a4a4a;
+}
+
+
 /* 上传进度弹窗 */
 #upload-overlay {
   position: fixed;

@@ -28,6 +28,7 @@ func main() {
 	flag.StringVar(&cfg.Session, "session", "", "session ID ([a-zA-Z0-9_-]+)")
 	flag.StringVar(&cfg.Program, "program", "", "bash|opencode")
 	flag.StringVar(&cfg.OpencodePath, "opencode-path", "", "opencode executable path")
+	flag.StringVar(&cfg.AuthEnvFile, "auth-env-file", "", "auth env file with export KEY='val' lines (injected into opencode env)")
 	flag.StringVar(&cfg.Rootfs, "rootfs", "", "base rootfs path")
 	flag.StringVar(&cfg.Network, "network", "none", "none|loopback|full")
 	flag.StringVar(&cfg.Memory, "memory", "", "cgroup memory.max (e.g. 512M)")
@@ -41,6 +42,11 @@ func main() {
 	coreDump := flag.Bool("core-dump", false, "allow core dumps")
 	procHidepid := flag.Bool("proc-hidepid", true, "mount /proc with hidepid=2")
 	bindHosts := flag.Bool("bind-hosts", false, "bind host /etc/hosts into sandbox /etc/hosts")
+	bindResolv := flag.Bool("bind-resolv", false, "bind host /etc/resolv.conf into sandbox /etc/resolv.conf")
+	usernsInitPath := flag.String("userns-init-path", "", "userns-init executable path (default: derived as <sandbox-init dir>/userns-init)")
+	httpProxy := flag.String("http-proxy", "", "http proxy URL injected into sandbox env (http_proxy)")
+	httpsProxy := flag.String("https-proxy", "", "https proxy URL injected into sandbox env (https_proxy)")
+	noProxy := flag.String("no-proxy", "", "no_proxy list injected into sandbox env")
 	var bindMountSrcs, bindMountTargets strList
 	flag.Var(&bindMountSrcs, "bind-mount", "host source path to bind (paired with --bind-mount-target)")
 	flag.Var(&bindMountTargets, "bind-mount-target", "sandbox target path (paired with --bind-mount)")
@@ -51,6 +57,11 @@ func main() {
 	cfg.CoreDump = *coreDump
 	cfg.ProcHidepid = *procHidepid
 	cfg.BindHosts = *bindHosts
+	cfg.BindResolv = *bindResolv
+	cfg.UsernsInitPath = *usernsInitPath
+	cfg.HTTPProxy = *httpProxy
+	cfg.HTTPSProxy = *httpsProxy
+	cfg.NoProxy = *noProxy
 	// --bind-mount 与 --bind-mount-target 必须成对出现（每对为一个 BindMountSpec）。
 	if len(bindMountSrcs) != len(bindMountTargets) {
 		log.Fatalf("sandbox-init: --bind-mount and --bind-mount-target must be paired, got %d sources and %d targets",

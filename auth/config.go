@@ -38,7 +38,14 @@ type OpencodeConfig struct {
 	// true：全量覆盖；false：opencode.jsonc 仅在目标不存在时复制（skills 始终覆盖）。
 	// 用 *bool 以区分「未设置」（缺省 true）与显式 false。
 	Overwrite *bool `yaml:"overwrite"`
+	// AuthTimeout api_key 补全弹窗的等待超时（秒）。0 或负数走默认 60 秒。
+	AuthTimeout int `yaml:"auth_timeout"`
+	// AuthFile 用户 api_key 存储文件名（位于用户家目录）。空走默认 ".auth.json"。
+	AuthFile string `yaml:"auth_file"`
 }
+
+// DefaultAuthTimeout opencode api_key 补全弹窗默认等待超时（60 秒）。
+const DefaultAuthTimeout = 60
 
 // OverwriteEnabled 返回 overwrite 是否生效（缺省 true）。
 func (o *OpencodeConfig) OverwriteEnabled() bool {
@@ -82,6 +89,17 @@ type SandboxConfig struct {
 	CgroupRoot string `yaml:"cgroup_root"`
 	// BindHosts 是否把宿主机 /etc/hosts 映射到沙箱内 /etc/hosts。
 	BindHosts bool `yaml:"bind_hosts"`
+	// BindResolv 是否把宿主机 /etc/resolv.conf 映射到沙箱内 /etc/resolv.conf
+	//（解决沙箱内域名无法解析；需 network: full 时 127.0.0.53 才可达）。
+	BindResolv bool `yaml:"bind_resolv"`
+	// UsernsInitPath userns-init 可执行文件绝对路径；空则由 sandbox-init 所在目录推导。
+	UsernsInitPath string `yaml:"userns_init_path"`
+	// HTTPProxy http 代理地址；非空时注入沙箱环境变量 http_proxy/HTTP_PROXY。
+	HTTPProxy string `yaml:"http_proxy"`
+	// HTTPSProxy https 代理地址；非空时注入沙箱环境变量 https_proxy/HTTPS_PROXY。
+	HTTPSProxy string `yaml:"https_proxy"`
+	// NoProxy 不使用代理的主机列表；非空时注入沙箱环境变量 no_proxy/NO_PROXY。
+	NoProxy string `yaml:"no_proxy"`
 	// BindMounts 宿主路径 bind 到沙箱路径的列表（如 NFS 挂载点）。
 	BindMounts []BindMount `yaml:"bind_mounts"`
 }
@@ -153,7 +171,7 @@ func (s *SandboxConfig) NetworkMode() string {
 }
 
 // DefaultSandboxInitPath 默认 sandbox-init 部署路径。
-const DefaultSandboxInitPath = "/opt/webshell_sandbox/sandbox-init"
+const DefaultSandboxInitPath = "/opt/webshell_sandbox_new/sandbox-init"
 
 // DefaultSandboxRootfs 默认 base rootfs 路径。
 const DefaultSandboxRootfs = "/opt/runner/rootfs/base"
@@ -253,9 +271,17 @@ opencode:
 # seccomp: true（缺省）安装 seccomp 黑名单；false 关闭
 # proc_hidepid: true（缺省）以 hidepid=2 挂载 /proc；false 关闭
 # cgroup_root: cgroup v2 根目录（缺省给默认值）
+# bind_hosts: true 把宿主机 /etc/hosts 映射进沙箱（解决沙箱内主机名解析）
+# bind_resolv: true 把宿主机 /etc/resolv.conf 映射进沙箱（解决沙箱内域名解析；
+#   建议 network: full 时开启，此时沙箱共享宿主网络栈，宿主 DNS（如
+#   127.0.0.53 systemd-resolved stub）在沙箱内可达）
+# userns_init_path: ""  # userns-init 可执行文件绝对路径；留空自动推导为 sandbox-init 同目录下的 userns-init
+# http_proxy: ""    # http 代理（如 "http://proxy.example.com:8080"），非空时注入沙箱环境变量
+# https_proxy: ""   # https 代理（如 "http://proxy.example.com:8080"），非空时注入沙箱环境变量
+# no_proxy: ""      # 不使用代理的主机（如 "localhost,127.0.0.1"），非空时注入沙箱环境变量
 sandbox:
   enabled: false
-  init_path: "/opt/webshell_sandbox/sandbox-init"
+  init_path: "/opt/webshell_sandbox_new/sandbox-init"
   rootfs_path: "/opt/runner/rootfs/base"
   network: "none"
   tmp_size: "256M"

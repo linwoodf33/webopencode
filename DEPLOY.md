@@ -55,44 +55,48 @@ scp -r webshell/ root@<server>:/root/webshell
 ### 2. 构建 Go 二进制
 ```bash
 cd /root/webshell
-go build -o /opt/webshell_sandbox/webshell .
-go build -o /opt/webshell_sandbox/sandbox-init ./sandbox
+go build -o /opt/webshell_sandbox1/webshell .
+go build -o /opt/webshell_sandbox1/sandbox-init ./sandbox
 ```
 
 ### 3. 编译 C 辅助程序（userns-init）
 ```bash
-gcc -O2 -static -o /opt/webshell_sandbox/userns-init /root/webshell/sandbox/userns_init.c
+gcc -O2 -static -o /opt/webshell_sandbox1/userns-init /root/webshell/sandbox/userns_init.c
 ```
 
 ### 4. 创建部署目录并设置权限
 ```bash
-mkdir -p /opt/webshell_sandbox
-chown root:root /opt/webshell_sandbox && chmod 0755 /opt/webshell_sandbox
-chown root:root /opt/webshell_sandbox/sandbox-init /opt/webshell_sandbox/userns-init
-chmod 0755 /opt/webshell_sandbox/sandbox-init /opt/webshell_sandbox/userns-init
-chown ease:ease /opt/webshell_sandbox/webshell
+mkdir -p /opt/webshell_sandbox1
+chown root:root /opt/webshell_sandbox1 && chmod 0755 /opt/webshell_sandbox1
+chown root:root /opt/webshell_sandbox1/sandbox-init /opt/webshell_sandbox1/userns-init
+chmod 0755 /opt/webshell_sandbox1/sandbox-init /opt/webshell_sandbox1/userns-init
+chown ease:ease /opt/webshell_sandbox1/webshell
 ```
 
-> **重要安全要求**：`/opt/webshell_sandbox` 目录属主必须是 `root:root` 且 `0755`，
+> **重要安全要求**：`/opt/webshell_sandbox1` 目录属主必须是 `root:root` 且 `0755`，
 > 否则服务账号 ease 可替换 `sandbox-init` 二进制提权 root。
+
+> 部署目录可自定义（本文档以 `/opt/webshell_sandbox1` 为例）：若更换部署目录，需同步修改
+> `config.yaml` 的 `init_path`、sudoers 精确路径规则与 systemd 单元，并注意 `userns_init_path`
+> 留空时自动推导为 sandbox-init 同目录（见「五、配置」）。
 
 ---
 
 ## 四、构建沙箱 rootfs
 
 ### 1. 获取 rootfs 构建脚本
-`build_rootfs.sh` 位于已部署服务器的 `/opt/webshell_sandbox/scripts/build_rootfs.sh`（不在 Go 源码目录中）。
+`build_rootfs.sh` 位于已部署服务器的 `/opt/webshell_sandbox1/scripts/build_rootfs.sh`（不在 Go 源码目录中）。
 从已部署服务器拷贝到新服务器：
 ```bash
-mkdir -p /opt/webshell_sandbox/scripts
-scp <source-server>:/opt/webshell_sandbox/scripts/build_rootfs.sh /opt/webshell_sandbox/scripts/
+mkdir -p /opt/webshell_sandbox1/scripts
+scp <source-server>:/opt/webshell_sandbox1/scripts/build_rootfs.sh /opt/webshell_sandbox1/scripts/
 ```
 > 该脚本从**目标服务器自身**的 /usr/bin 等拷贝二进制与依赖到 rootfs，因此必须在目标服务器上运行（它构建的是目标服务器的 rootfs）。
 
 ### 2. 运行构建脚本（需 root）
 ```bash
-chmod +x /opt/webshell_sandbox/scripts/build_rootfs.sh
-/opt/webshell_sandbox/scripts/build_rootfs.sh
+chmod +x /opt/webshell_sandbox1/scripts/build_rootfs.sh
+/opt/webshell_sandbox1/scripts/build_rootfs.sh
 ```
 - 目标目录：`/opt/runner/rootfs/base`（约 500-600MB）
 - 脚本会从宿主拷贝 bash/coreutils/gcc/python3/make/vim 及其动态依赖
@@ -113,7 +117,7 @@ cp -a /share/apps/.opencode/bin/opencode $ROOT/share/apps/.opencode/bin/
 
 ### 1. 编写 config.yaml
 ```bash
-cat > /opt/webshell_sandbox/config.yaml <<'EOF'
+cat > /opt/webshell_sandbox1/config.yaml <<'EOF'
 # Web Shell Sandbox 配置
 ad:
   server: "LDAPS_SERVER:636"        # 替换为实际 AD/LDAPS 地址
@@ -130,12 +134,12 @@ listen: "0.0.0.0:8090"              # 端口可改
 opencode:
   enabled: true
   path: "/share/apps/.opencode/bin/opencode"
-  sync_from: "/share/apps/opencode-config"
+  sync_from: "/share/apps/.opencode-config"
   overwrite: true
 
 sandbox:
   enabled: true
-  init_path: "/opt/webshell_sandbox/sandbox-init"
+  init_path: "/opt/webshell_sandbox1/sandbox-init"
   rootfs_path: "/opt/runner/rootfs/base"
   memory_max: "1G"
   cpu_quota: "200000 100000"
@@ -151,15 +155,24 @@ sandbox:
   cgroup_root: "/sys/fs/cgroup/webshell_sandbox"
   bind_mounts:
     - "/easeshare/SH/Method2"          # NFS 挂载点（宿主机须已挂载）
-    - "/share/apps/opencode-config"    # opencode 共享配置
+    - "/share/apps/.opencode-config"    # opencode 共享配置
   bind_hosts: true
+  bind_resolv: true
+  # userns_init_path: ""          # userns-init 绝对路径；留空自动推导为 sandbox-init 同目录下的 userns-init
+  http_proxy: ""                  # http 代理地址（如 "http://proxy.example.com:8080"）；非空时注入沙箱环境变量 http_proxy/HTTP_PROXY
+  https_proxy: ""                 # https 代理地址（如 "http://proxy.example.com:8080"）；非空时注入沙箱环境变量 https_proxy/HTTPS_PROXY
+  no_proxy: ""                    # 不使用代理的主机列表（如 "localhost,127.0.0.1"）；非空时注入沙箱环境变量 no_proxy/NO_PROXY
 EOF
-chown ease:ease /opt/webshell_sandbox/config.yaml
-chmod 600 /opt/webshell_sandbox/config.yaml
+chown ease:ease /opt/webshell_sandbox1/config.yaml
+chmod 600 /opt/webshell_sandbox1/config.yaml
 ```
 
 ### 2. 配置说明（关键点）
 - `bind_mounts`：宿主机**已挂载**的路径（含 NFS）bind 进沙箱。简单列表形式 `- "/path"`（source=target）。
+- `bind_resolv`：将宿主机 `/etc/resolv.conf` 映射进沙箱，解决沙箱内域名无法解析。建议 `network: full` 时开启（沙箱共享宿主网络栈，宿主 DNS stub `127.0.0.53` 可达）。
+- `userns_init_path`：userns-init 可执行文件绝对路径。**留空（缺省）时自动推导为 sandbox-init 同目录下的 `userns-init`**，无需额外配置；仅在需要将 userns-init 放到其他位置时显式指定。
+- `http_proxy` / `https_proxy`：http/https 代理地址（如 `"http://proxy.example.com:8080"`），非空时注入沙箱进程环境变量（同时设置小写与大写两种形式，如 `http_proxy` / `HTTP_PROXY`）。仅 `network: full` 时沙箱有外部网络，代理才能生效。
+- `no_proxy`：不使用代理的主机/域名列表（逗号分隔，如 `"localhost,127.0.0.1"`），非空时注入沙箱进程环境变量（同时设置 `no_proxy` / `NO_PROXY`）。
 - `network`：
   - `full`：共享宿主网络（NFS 访问、opencode 联网）
   - `none`/`loopback`：沙箱无外部网络（NFS 将不可访问）
@@ -179,7 +192,7 @@ mount -t nfs easemgt:/data/apps /share/apps
 
 ### 2. opencode 二进制与配置
 - opencode 二进制：`/share/apps/.opencode/bin/opencode`（沙箱内需 rootfs 内可执行）
-- opencode 共享配置：`/share/apps/opencode-config`（含 `opencode.jsonc` + `skills/`）
+- opencode 共享配置：`/share/apps/.opencode-config`（含 `opencode.jsonc` + `skills/`）
 
 ---
 
@@ -189,7 +202,7 @@ mount -t nfs easemgt:/data/apps /share/apps
 ```bash
 cat > /etc/sudoers.d/webshell-sandbox <<'EOF'
 # 允许服务用户 ease 仅以 root 运行 sandbox-init（精确路径，最短提权面）
-ease ALL=(root) NOPASSWD: /opt/webshell_sandbox/sandbox-init
+ease ALL=(root) NOPASSWD: /opt/webshell_sandbox1/sandbox-init
 EOF
 chmod 440 /etc/sudoers.d/webshell-sandbox
 chown root:root /etc/sudoers.d/webshell-sandbox
@@ -198,6 +211,13 @@ visudo -c   # 校验语法
 
 > **注意**：若现有 `/etc/sudoers.d/ease` 有 `ease ALL=(ALL,!root) NOPASSWD: ALL`（旧版 WebShell 用），
 > 保留它（用于非沙箱会话）；新规则精确到 sandbox-init 路径，互不冲突。
+>
+> **opencode API Key 透传（非沙箱模式）**：opencode 模式经 `sudo -n -E -u <user> -i bash -c ...`
+> 启动，`-E` 会把服务进程环境（含补全的 API Key）透传给目标用户进程。默认 sudoers 的
+> `env_reset` 会被 `-E` 覆盖，通常无需额外配置；**若**部署侧显式限制了 `-E`/环境保留
+> （例如自定义 `env_keep` 白名单或 `secure_path` 收紧），请确保相关变量（如
+> `ANTHROPIC_API_KEY`、`OPENAI_API_KEY` 等 opencode.jsonc 中 `{env:XXX}` 引用的变量）
+> 不被过滤，否则需在 `/etc/sudoers.d/` 增加 `Defaults: ease env_keep += "XXX_API_KEY"`。
 
 ### 2. cgroup 根目录
 ```bash
@@ -219,9 +239,9 @@ After=network.target
 [Service]
 Type=simple
 User=ease
-WorkingDirectory=/opt/webshell_sandbox
-Environment=CONFIG_PATH=/opt/webshell_sandbox/config.yaml
-ExecStart=/opt/webshell_sandbox/webshell
+WorkingDirectory=/opt/webshell_sandbox1
+Environment=CONFIG_PATH=/opt/webshell_sandbox1/config.yaml
+ExecStart=/opt/webshell_sandbox1/webshell
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=no
@@ -249,7 +269,7 @@ ss -tlnp | grep 8090   # 确认监听
 ### 2. 功能验证
 ```bash
 # 验证 sudo 链路（服务用户 ease）
-sudo -n -u root /opt/webshell_sandbox/sandbox-init --uid 1000 --gid 1000 \
+sudo -n -u root /opt/webshell_sandbox1/sandbox-init --uid 1000 --gid 1000 \
   --home /home/testuser --session test1 --program bash \
   --rootfs /opt/runner/rootfs/base --network full \
   --cgroup-root /sys/fs/cgroup/webshell_sandbox -- /bin/true
@@ -259,7 +279,7 @@ sudo -n -u root /opt/webshell_sandbox/sandbox-init --uid 1000 --gid 1000 \
 浏览器访问 `http://<server>:8090`，AD 登录后：
 - `id` 应显示真实用户名（uid/gid/补充组与宿主机一致）
 - `vim` 可用
-- `ls /share/apps/opencode-config/` 可见配置
+- `ls /share/apps/.opencode-config/` 可见配置
 - NFS bind 路径可见（若配置）
 
 ---
@@ -298,13 +318,13 @@ systemctl enable webshell-cgroup.service
 | NFS Permission denied | 沙箱丢失补充组 | 确认方案 A（非 userns，保留补充组）已部署 |
 | 中文乱码 | 缺 locale | rootfs 拷入 `/usr/lib/locale/locale-archive`，env 设 `LANG=en_US.utf8` |
 | cgroup 目录累积 | 会话清理失败 | 确认最新 userns-init（cleaner 移到根 cgroup + rmdir）|
-| 沙箱提权风险 | 目录属主错误 | `/opt/webshell_sandbox` 必须 root:root 0755 |
+| 沙箱提权风险 | 目录属主错误 | `/opt/webshell_sandbox1` 必须 root:root 0755 |
 
 ---
 
 ## 十一、安全加固清单
 
-- [ ] `/opt/webshell_sandbox` 属主 `root:root`、`0755`
+- [ ] `/opt/webshell_sandbox1` 属主 `root:root`、`0755`
 - [ ] `config.yaml` 属主 `ease`、`0600`（含 AD 密码）
 - [ ] sudoers 仅放行精确路径 `sandbox-init`
 - [ ] rootfs 内无 setuid 二进制（`su` 已去除 setuid 位）
@@ -350,13 +370,13 @@ export PATH=/usr/local/go/bin:$PATH
 go version   # 确认
 
 cd /root/webshell
-go build -o /opt/webshell_sandbox/webshell .
-go build -o /opt/webshell_sandbox/sandbox-init ./sandbox
-gcc -O2 -static -o /opt/webshell_sandbox/userns-init sandbox/userns_init.c
-chown root:root /opt/webshell_sandbox && chmod 0755 /opt/webshell_sandbox
-chown root:root /opt/webshell_sandbox/sandbox-init /opt/webshell_sandbox/userns-init
-chmod 0755 /opt/webshell_sandbox/sandbox-init /opt/webshell_sandbox/userns-init
-chown ease:ease /opt/webshell_sandbox/webshell
+go build -o /opt/webshell_sandbox1/webshell .
+go build -o /opt/webshell_sandbox1/sandbox-init ./sandbox
+gcc -O2 -static -o /opt/webshell_sandbox1/userns-init sandbox/userns_init.c
+chown root:root /opt/webshell_sandbox1 && chmod 0755 /opt/webshell_sandbox1
+chown root:root /opt/webshell_sandbox1/sandbox-init /opt/webshell_sandbox1/userns-init
+chmod 0755 /opt/webshell_sandbox1/sandbox-init /opt/webshell_sandbox1/userns-init
+chown ease:ease /opt/webshell_sandbox1/webshell
 ```
 
 ### 12.5 rootfs 构建（RHEL 特有）
@@ -418,7 +438,7 @@ ausearch -m avc -ts recent | tail   # 查看是否有 SELinux 拒绝日志（应
 ### 12.7 sudoers（RHEL）
 与 Ubuntu 相同，但 RHEL sudoers 需 `visudo -c` 校验；文件权限 `0440`：
 ```bash
-echo 'ease ALL=(root) NOPASSWD: /opt/webshell_sandbox/sandbox-init' > /etc/sudoers.d/webshell-sandbox
+echo 'ease ALL=(root) NOPASSWD: /opt/webshell_sandbox1/sandbox-init' > /etc/sudoers.d/webshell-sandbox
 chmod 440 /etc/sudoers.d/webshell-sandbox
 visudo -c
 ```

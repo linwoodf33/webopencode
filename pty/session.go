@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"os/user"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +29,9 @@ type Session struct {
 	closed   bool
 	workDir  string
 	username string
+	// authEnvFile 沙箱模式 opencode 会话写入的 .auth.env 路径（api_key 环境文件），
+	// 非空时 Close 时以目标用户身份删除（清理敏感文件）。
+	authEnvFile string
 }
 
 // NewSession 创建一个新的 pty 会话，并在其中启动 bash。
@@ -107,7 +112,7 @@ func startWithPty(cmd *exec.Cmd) (*os.File, error) {
 //
 // username 与 homeDir 必须由调用方完成系统存在性校验；若为空返回错误。
 func NewSessionForUser(username, homeDir string) (*Session, error) {
-	return NewSessionForUserMode(username, homeDir, nil, nil, "")
+	return NewSessionForUserMode(username, homeDir, nil, nil, "", nil)
 }
 
 // NewSessionForUserMode 以指定 Linux 用户启动一个 pty 会话。
@@ -127,7 +132,9 @@ func NewSessionForUser(username, homeDir string) (*Session, error) {
 // 传统 sudo 路径，零回归。sessionID 用于沙箱 cgroup 命名，仅在沙箱模式下使用。
 //
 // username 与 homeDir 必须由调用方完成系统存在性校验；若为空返回错误。
-func NewSessionForUserMode(username, homeDir string, opencode *auth.OpencodeConfig, sandboxCfg *auth.SandboxConfig, sessionID string) (*Session, error) {
+// authEnv 为 opencode 模式启动前补齐的 {环境变量: api_key} map，注入到 opencode
+// 进程环境；非 opencode 模式 / 无补齐项时传 nil 或空 map。
+func NewSessionForUserMode(username, homeDir string, opencode *auth.OpencodeConfig, sandboxCfg *auth.SandboxConfig, sessionID string, authEnv map[string]string) (*Session, error) {
 	if username == "" {
 		return nil, errors.New("empty username")
 	}
@@ -142,23 +149,25 @@ func NewSessionForUserMode(username, homeDir string, opencode *auth.OpencodeConf
 
 	// 沙箱模式：经 sandbox-init 启动用户命名空间沙箱。
 	if sandboxCfg != nil && sandboxCfg.Enabled {
-		return newSandboxSession(username, homeDir, opencode, sandboxCfg, sessionID, sudoPath)
+		return newSandboxSession(username, homeDir, opencode, sandboxCfg, sessionID, sudoPath, authEnv)
 	}
 
 	// 构造 sudo 命令参数。
 	// - bash 模式：`sudo -n -u <user> -i bash`
-	// - opencode 模式：`sudo -n -u <user> -i bash -c 'cd <homeDir> && <opencodePath>'`
+	// - opencode 模式：`sudo -n -E -u <user> -i bash -c 'cd <homeDir> && <opencodePath>'`
 	var cmd *exec.Cmd
 	if opencode != nil && opencode.Enabled {
 		if opencode.Path == "" {
 			return nil, errors.New("opencode enabled but path is empty")
 		}
-		// opencode 模式：`sudo -n -u <user> -i bash -c 'cd <homeDir> && <opencodePath>'`
+		// opencode 模式：`sudo -n -E -u <user> -i bash -c 'cd <homeDir> && <opencodePath>'`
 		//   - cd <homeDir> && 保证 cwd（homeDir 来自系统 user.Lookup，无注入风险）
 		//   - opencode 作为前台子进程运行；opencode 退出后 bash -c 立即结束，
 		//     从而完全退出登录会话（不再退回 bash）。
+		//   - -E 保留调用者环境：authEnv 里的 api_key 通过 cmd.Env 传入并透传给
+		//     opencode 进程（若部署侧 sudoers 对 -E 有 env_keep 限制，见 DEPLOY.md）。
 		command := "cd " + homeDir + " && " + opencode.Path
-		cmd = exec.Command(sudoPath, "-n", "-u", username, "-i", "bash", "-c", command)
+		cmd = exec.Command(sudoPath, "-n", "-E", "-u", username, "-i", "bash", "-c", command)
 	} else {
 		// sudo -n -u <username> -i bash
 		cmd = exec.Command(sudoPath, "-n", "-u", username, "-i", "bash")
@@ -184,6 +193,10 @@ func NewSessionForUserMode(username, homeDir string, opencode *auth.OpencodeConf
 	}
 	if opencode == nil || !opencode.Enabled {
 		env = append(env, "PS1=\\u@\\h:\\w\\$ ")
+	}
+	// 注入 opencode 启动前补齐的 api_key 环境变量（sudo -E 透传给目标用户进程）。
+	for k, v := range authEnv {
+		env = append(env, k+"="+v)
 	}
 	cmd.Env = append(os.Environ(), env...)
 
@@ -219,7 +232,7 @@ func NewSessionForUserMode(username, homeDir string, opencode *auth.OpencodeConf
 //
 // sessionID 与 cgroup 会话名一致（由调用方 ws.go 生成并传入），保证可追溯。
 // username/homeDir 必须已完成系统存在性校验。
-func newSandboxSession(username, homeDir string, opencode *auth.OpencodeConfig, sandboxCfg *auth.SandboxConfig, sessionID string, sudoPath string) (*Session, error) {
+func newSandboxSession(username, homeDir string, opencode *auth.OpencodeConfig, sandboxCfg *auth.SandboxConfig, sessionID string, sudoPath string, authEnv map[string]string) (*Session, error) {
 	if sandboxCfg == nil {
 		return nil, errors.New("sandbox config is nil")
 	}
@@ -284,8 +297,37 @@ func newSandboxSession(username, homeDir string, opencode *auth.OpencodeConfig, 
 	if sandboxCfg.BindHosts {
 		args = append(args, "--bind-hosts")
 	}
+	if sandboxCfg.BindResolv {
+		args = append(args, "--bind-resolv")
+	}
+	if sandboxCfg.UsernsInitPath != "" {
+		args = append(args, "--userns-init-path", sandboxCfg.UsernsInitPath)
+	}
+	if sandboxCfg.HTTPProxy != "" {
+		args = append(args, "--http-proxy", sandboxCfg.HTTPProxy)
+	}
+	if sandboxCfg.HTTPSProxy != "" {
+		args = append(args, "--https-proxy", sandboxCfg.HTTPSProxy)
+	}
+	if sandboxCfg.NoProxy != "" {
+		args = append(args, "--no-proxy", sandboxCfg.NoProxy)
+	}
 	for _, m := range sandboxCfg.BindMounts {
 		args = append(args, "--bind-mount", m.Source, "--bind-mount-target", m.Target)
+	}
+
+	// opencode 模式下若有补齐的 api_key：以目标用户身份写入 .auth.env 文件
+	// （内容 export KEY='val'，0600），并把路径透传给 sandbox-init 注入环境。
+	// 沙箱内家目录被 bind 到与宿主相同相对路径，childInit 降权后（目标用户身份）
+	// 可直接读取该文件。api_key 不进 sandbox-init 命令行参数/进程列表。
+	authEnvFile := ""
+	if len(authEnv) > 0 {
+		f, werr := WriteAuthEnvFile(username, homeDir, authEnv)
+		if werr != nil {
+			return nil, werr
+		}
+		authEnvFile = f
+		args = append(args, "--auth-env-file", authEnvFile)
 	}
 
 	// sudo -n -u root <InitPath> ...
@@ -307,14 +349,19 @@ func newSandboxSession(username, homeDir string, opencode *auth.OpencodeConfig, 
 
 	master, err := startWithPty(cmd)
 	if err != nil {
+		// 启动失败：清理已写入的 .auth.env（避免残留敏感文件）。
+		if authEnvFile != "" {
+			_ = RemoveAuthEnvFile(username, homeDir)
+		}
 		return nil, errors.New("sandbox/sudo/pty.Start failed: " + err.Error())
 	}
 
 	return &Session{
-		master:   master,
-		cmd:      cmd,
-		workDir:  homeDir,
-		username: username,
+		master:      master,
+		cmd:         cmd,
+		workDir:     homeDir,
+		username:    username,
+		authEnvFile: authEnvFile,
 	}, nil
 }
 
@@ -423,11 +470,19 @@ func (s *Session) Close() {
 		s.mu.Lock()
 		s.closed = true
 		master := s.master
+		authEnvFile := s.authEnvFile
 		s.mu.Unlock()
 
 		// 关闭 master 会让 bash 读到 EOF 而退出。
 		if master != nil {
 			master.Close()
+		}
+
+		// 清理沙箱模式 opencode 的 api_key 环境文件（以目标用户身份删除）。
+		if authEnvFile != "" {
+			if err := RemoveAuthEnvFile(s.username, s.workDir); err != nil {
+				log.Printf("warn: remove auth env file %s: %v", authEnvFile, err)
+			}
 		}
 
 		if s.cmd != nil && s.cmd.Process != nil {
@@ -610,4 +665,69 @@ func (s *Session) CheckWritableAsUser(dir string) (string, error) {
 		return "", errors.New(msg)
 	}
 	return dir, nil
+}
+
+// WriteAuthEnvFile 以目标用户身份写入沙箱 opencode 的 api_key 环境文件
+// <homeDir>/.config/opencode/.auth.env（内容为 `export KEY='val'` 行，权限 0600）。
+//
+// 经 `sudo -u <user> bash -c 'umask 077; cat > <dest> && chmod 600 <dest>'` 执行，
+// 内容经 stdin 传入（api_key 不进命令行参数）。沙箱内家目录 bind 到与宿主相同
+// 相对路径，sandbox-init 降权后（目标用户身份）可直接读取该文件并注入环境。
+//
+// authEnv 为空时返回 ("", nil)，不做任何操作。返回实际写入的绝对路径。
+func WriteAuthEnvFile(username, homeDir string, authEnv map[string]string) (string, error) {
+	if len(authEnv) == 0 {
+		return "", nil
+	}
+	if username == "" || homeDir == "" {
+		return "", errors.New("empty username or homeDir")
+	}
+
+	// 排序保证文件内容确定性（便于排查与幂等）。
+	keys := make([]string, 0, len(authEnv))
+	for k := range authEnv {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var sb strings.Builder
+	for _, k := range keys {
+		sb.WriteString("export " + k + "=" + shellQuote(authEnv[k]) + "\n")
+	}
+
+	sudoPath, err := exec.LookPath("sudo")
+	if err != nil {
+		return "", errors.New("cannot find sudo: " + err.Error())
+	}
+
+	dest := homeDir + "/.config/opencode/.auth.env"
+	cmd := exec.Command(sudoPath, "-n", "-u", username, "bash", "-c",
+		"umask 077; cat > "+shellQuote(dest)+" && chmod 600 "+shellQuote(dest))
+	cmd.Dir = "/"
+	cmd.Stdin = strings.NewReader(sb.String())
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", errors.New(msg)
+	}
+	return dest, nil
+}
+
+// RemoveAuthEnvFile 以目标用户身份删除 <homeDir>/.config/opencode/.auth.env
+// （会话结束时清理敏感文件；文件不存在时静默成功）。
+func RemoveAuthEnvFile(username, homeDir string) error {
+	if username == "" || homeDir == "" {
+		return nil
+	}
+	sudoPath, err := exec.LookPath("sudo")
+	if err != nil {
+		return errors.New("cannot find sudo: " + err.Error())
+	}
+	dest := homeDir + "/.config/opencode/.auth.env"
+	cmd := exec.Command(sudoPath, "-n", "-u", username, "bash", "-c", "rm -f "+shellQuote(dest))
+	cmd.Dir = "/"
+	return cmd.Run()
 }

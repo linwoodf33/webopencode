@@ -193,7 +193,7 @@ func TestLoadConfigFileNotFound(t *testing.T) {
 }
 
 func TestLoadConfigSandboxBindMounts(t *testing.T) {
-	// sandbox 启用时解析 bind_hosts / bind_mounts 配置。
+	// sandbox 启用时解析 bind_hosts / bind_resolv / bind_mounts 配置。
 	path := writeTempConfig(t, `
 ad:
   server: "ldaps.example.com:636"
@@ -203,6 +203,7 @@ ad:
 sandbox:
   enabled: true
   bind_hosts: true
+  bind_resolv: true
   bind_mounts:
     - source: "/easeshare/SH/Method2"
       target: "/easeshare/SH/Method2"
@@ -218,6 +219,9 @@ sandbox:
 	}
 	if !cfg.Sandbox.BindHosts {
 		t.Error("sandbox.bind_hosts should be true")
+	}
+	if !cfg.Sandbox.BindResolv {
+		t.Error("sandbox.bind_resolv should be true")
 	}
 	if len(cfg.Sandbox.BindMounts) != 2 {
 		t.Fatalf("sandbox.bind_mounts len = %d, want 2", len(cfg.Sandbox.BindMounts))
@@ -362,8 +366,108 @@ sandbox:
 	}
 }
 
+func TestLoadConfigSandboxUsernsInitPath(t *testing.T) {
+	// sandbox 启用时解析 userns_init_path 配置；留空则保持空串（由运行时推导）。
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+sandbox:
+  enabled: true
+  userns_init_path: "/custom/path/userns-init"
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.Sandbox.Enabled {
+		t.Error("sandbox.enabled should be true")
+	}
+	if cfg.Sandbox.UsernsInitPath != "/custom/path/userns-init" {
+		t.Errorf("sandbox.userns_init_path = %q, want %q", cfg.Sandbox.UsernsInitPath, "/custom/path/userns-init")
+	}
+}
+
+func TestLoadConfigSandboxUsernsInitPathEmpty(t *testing.T) {
+	// 未显式设置 userns_init_path 时保持空串（运行时默认推导为
+	// sandbox-init 同目录下的 userns-init），不设默认路径。
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+sandbox:
+  enabled: true
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Sandbox.UsernsInitPath != "" {
+		t.Errorf("sandbox.userns_init_path = %q, want empty (runtime derivation)", cfg.Sandbox.UsernsInitPath)
+	}
+}
+
+func TestLoadConfigSandboxProxyConfig(t *testing.T) {
+	// 显式配置 http_proxy / https_proxy / no_proxy 时解析正确。
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+sandbox:
+  enabled: true
+  http_proxy: "http://proxy.example.com:8080"
+  https_proxy: "http://proxy.example.com:8080"
+  no_proxy: "localhost,127.0.0.1"
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Sandbox.HTTPProxy != "http://proxy.example.com:8080" {
+		t.Errorf("sandbox.http_proxy = %q, want %q", cfg.Sandbox.HTTPProxy, "http://proxy.example.com:8080")
+	}
+	if cfg.Sandbox.HTTPSProxy != "http://proxy.example.com:8080" {
+		t.Errorf("sandbox.https_proxy = %q, want %q", cfg.Sandbox.HTTPSProxy, "http://proxy.example.com:8080")
+	}
+	if cfg.Sandbox.NoProxy != "localhost,127.0.0.1" {
+		t.Errorf("sandbox.no_proxy = %q, want %q", cfg.Sandbox.NoProxy, "localhost,127.0.0.1")
+	}
+}
+
+func TestLoadConfigSandboxProxyDefaults(t *testing.T) {
+	// 未显式配置 http_proxy / https_proxy / no_proxy 时保持空字符串。
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+sandbox:
+  enabled: true
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Sandbox.HTTPProxy != "" {
+		t.Errorf("sandbox.http_proxy = %q, want empty", cfg.Sandbox.HTTPProxy)
+	}
+	if cfg.Sandbox.HTTPSProxy != "" {
+		t.Errorf("sandbox.https_proxy = %q, want empty", cfg.Sandbox.HTTPSProxy)
+	}
+	if cfg.Sandbox.NoProxy != "" {
+		t.Errorf("sandbox.no_proxy = %q, want empty", cfg.Sandbox.NoProxy)
+	}
+}
+
 func TestLoadConfigSandboxBindDefaults(t *testing.T) {
-	// 未显式设置时 bind_hosts=false、bind_mounts 为空。
+	// 未显式设置时 bind_hosts=false、bind_resolv=false、bind_mounts 为空。
 	path := writeTempConfig(t, `
 ad:
   server: "ldaps.example.com:636"
@@ -379,6 +483,9 @@ sandbox:
 	}
 	if cfg.Sandbox.BindHosts {
 		t.Error("sandbox.bind_hosts should default to false")
+	}
+	if cfg.Sandbox.BindResolv {
+		t.Error("sandbox.bind_resolv should default to false")
 	}
 	if len(cfg.Sandbox.BindMounts) != 0 {
 		t.Errorf("sandbox.bind_mounts len = %d, want 0", len(cfg.Sandbox.BindMounts))

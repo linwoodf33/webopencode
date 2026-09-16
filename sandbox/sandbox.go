@@ -38,28 +38,34 @@ import (
 
 // Config 保存 sandbox-init 的一次运行参数。
 type Config struct {
-	UID          int             // 真实用户 UID（正整数，非 0）
-	GID          int             // 真实用户 GID（正整数，非 0）
-	Groups       []int           // 真实用户的补充组 GID 列表（含主组，降权时 setgroups 保留）
-	Home         string          // 真实家目录（绝对路径，以 /home/ 开头）
-	Session      string          // 会话 ID（^[a-zA-Z0-9_-]+$，用于 cgroup 名，防路径注入）
-	Program      string          // bash | opencode
-	OpencodePath string          // --program=opencode 时的可执行文件绝对路径
-	Rootfs       string          // base rootfs 路径
-	Network      string          // none | loopback | full
-	Memory       string          // cgroup memory.max（如 "512M"）
-	CPU          string          // cgroup cpu.max（如 "50000 100000"）
-	Pids         int             // cgroup pids.max
-	Seccomp      bool            // 是否安装 seccomp 过滤器
-	TmpSize      string          // /tmp tmpfs 大小（如 "256M"）
-	NoFile       int             // RLIMIT_NOFILE
-	CoreDump     bool            // false 时 RLIMIT_CORE=0
-	MaxFsize     string          // RLIMIT_FSIZE（如 "1G"）
-	ProcHidepid  bool            // /proc 挂载 hidepid=2
-	DevList      []string        // 需要 mknod 的设备类型列表（预留，默认最小集）
-	CgroupRoot   string          // cgroup v2 根目录（/<session> 子目录作为该会话的 cgroup）
-	BindHosts    bool            // 是否把宿主机 /etc/hosts 映射到沙箱内 /etc/hosts
-	BindMounts   []BindMountSpec // 宿主路径 bind 到沙箱路径的列表（如 NFS 挂载点）
+	UID            int             // 真实用户 UID（正整数，非 0）
+	GID            int             // 真实用户 GID（正整数，非 0）
+	Groups         []int           // 真实用户的补充组 GID 列表（含主组，降权时 setgroups 保留）
+	Home           string          // 真实家目录（绝对路径，以 /home/ 开头）
+	Session        string          // 会话 ID（^[a-zA-Z0-9_-]+$，用于 cgroup 名，防路径注入）
+	Program        string          // bash | opencode
+	OpencodePath   string          // --program=opencode 时的可执行文件绝对路径
+	Rootfs         string          // base rootfs 路径
+	Network        string          // none | loopback | full
+	Memory         string          // cgroup memory.max（如 "512M"）
+	CPU            string          // cgroup cpu.max（如 "50000 100000"）
+	Pids           int             // cgroup pids.max
+	Seccomp        bool            // 是否安装 seccomp 过滤器
+	TmpSize        string          // /tmp tmpfs 大小（如 "256M"）
+	NoFile         int             // RLIMIT_NOFILE
+	CoreDump       bool            // false 时 RLIMIT_CORE=0
+	MaxFsize       string          // RLIMIT_FSIZE（如 "1G"）
+	ProcHidepid    bool            // /proc 挂载 hidepid=2
+	DevList        []string        // 需要 mknod 的设备类型列表（预留，默认最小集）
+	CgroupRoot     string          // cgroup v2 根目录（/<session> 子目录作为该会话的 cgroup）
+	BindHosts      bool            // 是否把宿主机 /etc/hosts 映射到沙箱内 /etc/hosts
+	BindResolv     bool            // 是否把宿主机 /etc/resolv.conf 映射到沙箱内 /etc/resolv.conf
+	BindMounts     []BindMountSpec // 宿主路径 bind 到沙箱路径的列表（如 NFS 挂载点）
+	AuthEnvFile    string          // 可选：api_key 环境文件（内容为 export KEY='val' 行，0600）
+	UsernsInitPath string          // 可选：userns-init 可执行文件绝对路径；为空则默认推导为 sandbox-init 同目录下的 userns-init
+	HTTPProxy      string          // 可选：http 代理 URL；非空时注入沙箱环境变量 http_proxy/HTTP_PROXY
+	HTTPSProxy     string          // 可选：https 代理 URL；非空时注入沙箱环境变量 https_proxy/HTTPS_PROXY
+	NoProxy        string          // 可选：不使用代理的主机列表；非空时注入沙箱环境变量 no_proxy/NO_PROXY
 }
 
 // BindMountSpec 表示一个"宿主路径 bind 到沙箱路径"的挂载。
@@ -180,8 +186,23 @@ func childArgs(cfg *Config) []string {
 	if cfg.Program == "opencode" {
 		args = append(args, "--opencode-path", cfg.OpencodePath)
 	}
+	if cfg.AuthEnvFile != "" {
+		args = append(args, "--auth-env-file", cfg.AuthEnvFile)
+	}
+	if cfg.HTTPProxy != "" {
+		args = append(args, "--http-proxy", cfg.HTTPProxy)
+	}
+	if cfg.HTTPSProxy != "" {
+		args = append(args, "--https-proxy", cfg.HTTPSProxy)
+	}
+	if cfg.NoProxy != "" {
+		args = append(args, "--no-proxy", cfg.NoProxy)
+	}
 	if cfg.BindHosts {
 		args = append(args, "--bind-hosts")
+	}
+	if cfg.BindResolv {
+		args = append(args, "--bind-resolv")
 	}
 	for _, m := range cfg.BindMounts {
 		args = append(args, "--bind-mount", m.Source, "--bind-mount-target", m.Target)
@@ -198,7 +219,21 @@ func childArgs(cfg *Config) []string {
 // unshare NS/PID/NET。补充组列表不传给 C（C 不再降权），而是随 childArgs
 // 放在 "--" 之后由 child（sandbox-init --child）解析使用。
 func execUsernsInit(cfg *Config) error {
-	const usernsInitPath = "/opt/webshell_sandbox/userns-init"
+	// selfExe 为 sandbox-init 自身真实路径（/proc/self/exe 解析后的绝对路径），
+	// 用于：1) 推导默认 userns-init 路径；2) 作为 "--" 之后的 re-exec 目标
+	// （childArgs 已含 --child 标记，C 程序最终 fork + exec 该路径）。
+	selfExe, err := os.Readlink("/proc/self/exe")
+	if err != nil {
+		return fmt.Errorf("readlink /proc/self/exe: %w", err)
+	}
+
+	// userns-init 路径：显式配置（--userns-init-path / cfg.UsernsInitPath）优先；
+	// 留空时默认推导为 sandbox-init 同目录下的 userns-init（二者本就同目录部署，
+	// 默认行为不变）。
+	usernsInitPath := cfg.UsernsInitPath
+	if usernsInitPath == "" {
+		usernsInitPath = filepath.Join(filepath.Dir(selfExe), "userns-init")
+	}
 
 	// C 程序参数：argv[0]=程序名，后接命名空间创建所需信息 + -- 分隔后的
 	// sandbox-init --child 参数。childArgs 已含 --child 标记；C 程序最终
@@ -215,11 +250,6 @@ func execUsernsInit(cfg *Config) error {
 		args = append(args, "--no-net")
 	}
 	args = append(args, "--")
-
-	selfExe, err := os.Readlink("/proc/self/exe")
-	if err != nil {
-		return fmt.Errorf("readlink /proc/self/exe: %w", err)
-	}
 	args = append(args, selfExe)
 	args = append(args, childArgs(cfg)...)
 
@@ -466,7 +496,8 @@ func applyCgroupLimits(dir string, cfg *Config) {
 //  5. tmpfs -> staging/tmp；
 //  6. tmpfs -> staging/dev + mknod 最小设备 + mkdir pts；
 //  7. proc -> staging/proc（hidepid 可选）；
-//  8. bind 配置的宿主路径（BindMounts，如 NFS 挂载点）与 /etc/hosts（BindHosts）；
+//  8. bind 配置的宿主路径（BindMounts，如 NFS 挂载点）、/etc/hosts（BindHosts）
+//     与 /etc/resolv.conf（BindResolv）；
 //  9. 将 staging（base rootfs）remount 为只读（不影响已建子挂载）。
 func buildRootFS(cfg *Config) (string, error) {
 	staging, err := os.MkdirTemp("", "sandbox-init-")
@@ -510,6 +541,30 @@ func buildRootFS(cfg *Config) (string, error) {
 	if cfg.BindHosts {
 		if err := unix.Mount("/etc/hosts", filepath.Join(staging, "etc", "hosts"), "", unix.MS_BIND, ""); err != nil {
 			return "", fmt.Errorf("bind /etc/hosts: %w", err)
+		}
+	}
+
+	// 映射宿主机 /etc/resolv.conf 到沙箱（解决沙箱内域名无法解析）。
+	// 目标文件 /etc/resolv.conf 在 base rootfs 中已存在（普通文件），可直接
+	// bind 覆盖。宿主 /etc/resolv.conf 通常是 symlink（如指向
+	// /run/systemd/resolve/stub-resolv.conf，即 127.0.0.53 systemd-resolved
+	// stub），bind 一个 symlink 会把符号链接本身挂进去（或挂载失败），故先用
+	// EvalSymlinks 解析出真实路径再 bind；解析失败（如该环境无此文件）时
+	// 回退 bind 原路径。
+	if cfg.BindResolv {
+		resolvSrc := "/etc/resolv.conf"
+		if resolved, err := filepath.EvalSymlinks(resolvSrc); err == nil && resolved != "" {
+			resolvSrc = resolved
+		} else {
+			log.Printf("warn: resolve %s: %v (fallback to bind %s itself)", resolvSrc, err, resolvSrc)
+		}
+		dst := filepath.Join(staging, "etc", "resolv.conf")
+		// /etc/resolv.conf 实际可能是挂载点（systemd-resolved 有时将其做成
+		// bind mount）。MS_BIND 失败（如源是挂载点需递归）时回退 MS_BIND|MS_REC。
+		if err := unix.Mount(resolvSrc, dst, "", unix.MS_BIND, ""); err != nil {
+			if err2 := unix.Mount(resolvSrc, dst, "", unix.MS_BIND|unix.MS_REC, ""); err2 != nil {
+				return "", fmt.Errorf("bind %s -> %s: %w (MS_BIND: %v)", resolvSrc, dst, err2, err)
+			}
 		}
 	}
 
@@ -800,6 +855,30 @@ func execProgram(cfg *Config) error {
 		"LC_ALL=en_US.utf8",
 	}
 
+	// 注入宿主侧以目标用户身份写入的 api_key 环境文件（内容 export KEY='val'）。
+	// 沙箱内家目录 bind 到与宿主相同相对路径，本进程此刻已是目标用户，可读。
+	// 读取/解析失败仅告警，不阻断 opencode 启动（best effort），但会明确提示
+	// 该会话可能缺少 API Key。
+	if cfg.AuthEnvFile != "" {
+		authEnv, err := readAuthEnvFile(cfg.AuthEnvFile)
+		if err != nil {
+			log.Printf("warn: read auth env file %s: %v (API keys may be missing)", cfg.AuthEnvFile, err)
+		} else {
+			env = append(env, authEnv...)
+		}
+	}
+
+	// 注入代理环境变量（配置非空时才设置；小写+大写都设，兼容各类程序）。
+	if cfg.HTTPProxy != "" {
+		env = append(env, "http_proxy="+cfg.HTTPProxy, "HTTP_PROXY="+cfg.HTTPProxy)
+	}
+	if cfg.HTTPSProxy != "" {
+		env = append(env, "https_proxy="+cfg.HTTPSProxy, "HTTPS_PROXY="+cfg.HTTPSProxy)
+	}
+	if cfg.NoProxy != "" {
+		env = append(env, "no_proxy="+cfg.NoProxy, "NO_PROXY="+cfg.NoProxy)
+	}
+
 	// 切换到用户家目录，使 bash/opencode 从用户的工程目录启动（与非沙箱路径
 	// sudo -i 进入家目录保持一致）。此处已在 pivot_root 后的新根内，cfg.Home
 	// 是被 bind 挂载到新根内与宿主相同相对路径（<newroot><cfg.Home>）的真实
@@ -812,4 +891,32 @@ func execProgram(cfg *Config) error {
 	}
 
 	return unix.Exec(path, argv, env)
+}
+
+// authEnvLineRe 匹配 .auth.env 文件中的 `export KEY='val'` 行。
+var authEnvLineRe = regexp.MustCompile(`^export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$`)
+
+// readAuthEnvFile 读取 api_key 环境文件，解析每行 `export KEY='val'` 为
+// KEY=val 的环境项。非 export 行与无法解析的行被忽略。api_key 值中的单引号
+// 由 WriteAuthEnvFile 以 shell 转义形式写出，此处简单剥离首尾单引号即可还原
+// （api_key 通常不含单引号；含时值内单引号将以转义形式保留，属极端边缘）。
+func readAuthEnvFile(path string) ([]string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read auth env file: %w", err)
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		m := authEnvLineRe.FindStringSubmatch(strings.TrimSpace(line))
+		if len(m) != 3 {
+			continue
+		}
+		val := strings.TrimSpace(m[2])
+		// 剥离包裹的单引号（export KEY='val'）。
+		if len(val) >= 2 && val[0] == '\'' && val[len(val)-1] == '\'' {
+			val = val[1 : len(val)-1]
+		}
+		out = append(out, m[1]+"="+val)
+	}
+	return out, nil
 }

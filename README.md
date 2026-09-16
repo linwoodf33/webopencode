@@ -23,6 +23,8 @@
 - **沙箱隔离**（user namespace 方案 A）：通过 `sudo -n -u root sandbox-init` 启动沙箱，mount/PID/net namespace + pivot_root + 只读 rootfs + cgroup + seccomp；沙箱内进程以**宿主真实用户身份**运行（保留补充组，非 root、非 userns root），解决 NFS 丢失补充组导致的 Permission denied 问题。
 - **bind_mounts 支持**：NFS 等宿主已挂载路径可 bind 进沙箱（简单列表或 source/target 对象形式）。
 - **/etc/hosts 映射**：`bind_hosts` 可将宿主机 `/etc/hosts` 映射进沙箱，解决沙箱内主机名解析。
+- **/etc/resolv.conf 映射**：`bind_resolv` 可将宿主机 `/etc/resolv.conf` 映射进沙箱，解决沙箱内域名无法解析（`network: full` 时生效最佳）。
+- **代理支持**：`http_proxy` / `https_proxy` / `no_proxy` 非空时注入沙箱进程环境变量（小写+大写两套），沙箱内网络请求可走代理（需 `network: full` 沙箱有外部网络）。
 - **沙箱内体验**：中文正常（`LANG=en_US.utf8`）、真实用户名提示符、vim（rootfs 内）、opencode（rootfs 内 + 共享配置 bind）均可用。
 
 ## 目录结构
@@ -67,13 +69,15 @@
 
 ```bash
 # 主程序
-go build -o /opt/webshell_sandbox/webshell .
+go build -o /opt/webshell_sandbox1/webshell .
 # 沙箱启动器（Go）
-go build -o /opt/webshell_sandbox/sandbox-init ./sandbox
+go build -o /opt/webshell_sandbox1/sandbox-init ./sandbox
 # C 辅助（单线程 unshare/ns 创建）
-gcc -O2 -static -o /opt/webshell_sandbox/userns-init sandbox/userns_init.c
+gcc -O2 -static -o /opt/webshell_sandbox1/userns-init sandbox/userns_init.c
 # rootfs 构建（见 DEPLOY.md / scripts/build_rootfs.sh）
 ```
+
+> 部署目录可自定义（本文档以 `/opt/webshell_sandbox1` 为例）：若更换部署目录，需同步修改 `config.yaml` 的 `init_path`、sudoers 精确路径规则、systemd 单元，并注意 `userns_init_path` 留空时自动推导为 sandbox-init 同目录（见「配置说明」）。
 
 前端静态资源已通过 `//go:embed` 内嵌进二进制，无需单独部署静态文件。
 
@@ -103,10 +107,16 @@ opencode:
   sync_from: "/opt/opencode-config"    # 共享配置源目录（含 skills/ 与 opencode.jsonc）
   overwrite: true                  # 首次初始化时是否覆盖 opencode.jsonc
 
+> **api_key 必须用 `{env:XXX_API_KEY}` 引用**：opencode 配置（`opencode.jsonc`）中的
+> `apiKey` 必须写为 `{env:XXX_API_KEY}` 形式（如 `"apiKey": "{env:YANFENG_API_KEY}"`）。
+> Web Shell 会读取该引用，若用户 `~/.auth.json` 缺失对应 api_key，则在 opencode 启动前
+> 弹窗让用户补全（见「WebSocket 协议」的 `auth-request`/`auth-response`）。**硬编码 key
+> 将无法触发补全机制**，且会随配置同步泄露给所有用户，请勿硬编码。
+
 # Linux 沙箱（sandbox-init 由 sudoers 以 root 启动，作为唯一提权入口）
 sandbox:
   enabled: false                  # true 启用沙箱；false 退回传统 sudo 切用户模式
-  init_path: "/opt/webshell_sandbox/sandbox-init"  # sandbox-init 二进制绝对路径
+  init_path: "/opt/webshell_sandbox1/sandbox-init"  # sandbox-init 二进制绝对路径
   rootfs_path: "/opt/runner/rootfs/base"   # base rootfs 绝对路径（只读新根 bind）
   network: "none"                 # none|loopback|full（缺省 none，即无网络）
   tmp_size: "256M"                # /tmp tmpfs 大小（缺省 256M）
@@ -121,6 +131,11 @@ sandbox:
     - "/easeshare/SH/Method2"     # 简单形式：source 与 target 相同（自动匹配宿主已挂载路径）
     - "/easeshare/SIMU3/Sys_Run"  # 亦兼容对象形式：{source: "...", target: "..."}
   bind_hosts: true                # 映射宿主机 /etc/hosts 到沙箱（解决沙箱内主机名解析）
+  bind_resolv: true               # 映射宿主机 /etc/resolv.conf 到沙箱（解决沙箱内域名解析）
+  # userns_init_path: ""          # userns-init 绝对路径；留空自动推导为 sandbox-init 同目录下的 userns-init
+  http_proxy: ""                     # http 代理地址（如 "http://proxy.example.com:8080"）；非空时注入沙箱环境变量 http_proxy/HTTP_PROXY
+  https_proxy: ""                    # https 代理地址（如 "http://proxy.example.com:8080"）；非空时注入沙箱环境变量 https_proxy/HTTPS_PROXY
+  no_proxy: ""                       # 不使用代理的主机列表（如 "localhost,127.0.0.1"）；非空时注入沙箱环境变量 no_proxy/NO_PROXY
 ```
 
 > 配置同步仅在用户首次初始化（`~/.config/opencode/skills` 不存在）时执行；一旦 `skills` 目录已存在，则跳过全部同步（opencode.jsonc 与 skills 均不覆盖），保留用户已有配置。`overwrite` 仅在首次初始化时生效。
@@ -137,6 +152,10 @@ sandbox:
 - `cgroup_root`：cgroup v2 根目录（需 root 预创建并启用 cpu/memory/pids 控制器）。
 - `bind_mounts`：宿主已挂载路径（含 NFS）bind 进沙箱。简单形式字符串列表（source=target）；也可用对象形式 `{source: "...", target: "..."}` 支持 source 与 target 不同。
 - `bind_hosts`：将宿主机 `/etc/hosts` 映射进沙箱，解决沙箱内主机名解析。
+- `bind_resolv`：将宿主机 `/etc/resolv.conf` 映射进沙箱，解决沙箱内域名解析。建议 `network: full`（共享宿主网络栈）时开启，此时宿主 DNS（如 `127.0.0.53` systemd-resolved stub）在沙箱内可达。
+- `userns_init_path`：userns-init 可执行文件绝对路径。**留空（缺省）时自动推导为 sandbox-init 同目录下的 `userns-init`**，无需额外配置；仅在需要将 userns-init 放到其他位置时显式指定。
+- `http_proxy` / `https_proxy`：http/https 代理地址（如 `"http://proxy.example.com:8080"`），非空时注入沙箱进程环境变量（同时设置小写与大写两种形式，如 `http_proxy` / `HTTP_PROXY`）。仅 `network: full` 时沙箱有外部网络，代理才能生效。
+- `no_proxy`：不使用代理的主机/域名列表（逗号分隔，如 `"localhost,127.0.0.1"`），非空时注入沙箱进程环境变量（同时设置 `no_proxy` / `NO_PROXY`）。
 
 ### 配置加载优先级
 
@@ -199,7 +218,7 @@ systemctl status webshell   # 查看状态
 启用 Linux 沙箱隔离时，除常规部署外还需：构建 3 个二进制（webshell / sandbox-init / userns-init）、构建 rootfs、配置 `config.yaml` 的 `sandbox` 块、配置 sudoers + cgroup + systemd 单元，最后启动验证。**详细部署见 DEPLOY.md，含 Ubuntu 与 RHEL（关闭 SELinux）**，此处仅列概要：
 
 1. **构建 3 个二进制**：`go build` 主程序与 `sandbox-init`，`gcc -O2 -static` 编译 `userns-init`（见「编译构建」）。
-2. **构建 rootfs**：在目标服务器上运行 `/opt/webshell_sandbox/scripts/build_rootfs.sh`（需 root），构建到 `/opt/runner/rootfs/base`（约 500–600MB）。
+2. **构建 rootfs**：在目标服务器上运行 `/opt/webshell_sandbox1/scripts/build_rootfs.sh`（需 root），构建到 `/opt/runner/rootfs/base`（约 500–600MB）。
 3. **配置 config.yaml**：启用 `sandbox.enabled: true`，设置 `init_path`、`rootfs_path`、`network`、`bind_mounts`、`bind_hosts` 等（见「配置说明」）。
 4. **sudoers + cgroup + systemd**：添加沙箱 sudoers 规则；预创建 `/sys/fs/cgroup/webshell_sandbox` 并启用 cpu/memory/pids 控制器；配置 `webshell-sandbox.service`（端口可配，示例 8090）。
 5. **启动验证**：启动 systemd 服务，浏览器 AD 登录后，沙箱内 `id` 应显示真实用户名（uid/gid/补充组与宿主机一致），vim、opencode、NFS bind 路径可用。
@@ -229,11 +248,11 @@ ease  ALL=(ALL,!root)  NOPASSWD: ALL
 
 ```bash
 # /etc/sudoers.d/webshell-sandbox
-ease ALL=(root) NOPASSWD: /opt/webshell_sandbox/sandbox-init
+ease ALL=(root) NOPASSWD: /opt/webshell_sandbox1/sandbox-init
 ```
 
-> - 沙箱二进制经 `sudo -n -u root /opt/webshell_sandbox/sandbox-init`（**无 `-i`**）以 root 启动，内部完成 unshare/pivot_root 后降权到真实用户（含补充组）；
-> - `/opt/webshell_sandbox` 目录必须 **root:root 0755**，防止服务用户替换 `sandbox-init` 二进制提权 root；
+> - 沙箱二进制经 `sudo -n -u root /opt/webshell_sandbox1/sandbox-init`（**无 `-i`**）以 root 启动，内部完成 unshare/pivot_root 后降权到真实用户（含补充组）；
+> - `/opt/webshell_sandbox1` 目录必须 **root:root 0755**，防止服务用户替换 `sandbox-init` 二进制提权 root；
 > - 原 `ease ALL=(ALL,!root) NOPASSWD: ALL` 规则可保留（用于非沙箱会话及配置同步），与沙箱规则互不冲突；
 > - cgroup 根目录（如 `/sys/fs/cgroup/webshell_sandbox`）需 root 预创建，并启用 cpu/memory/pids 控制器；systemd 开机自启见 DEPLOY.md。
 
@@ -277,7 +296,7 @@ WebSocket 升级时通过 `?mode=` 查询参数决定会话类型（`handler/ws.
 - `mode=opencode` 且 opencode 已启用 → 先同步配置，再以该用户启动 opencode TUI；
 - 其余情况（未传 / `mode=bash` / opencode 未启用）→ 直接进入该用户的 bash。
 
-**沙箱模式启动**：启用沙箱（`sandbox.enabled=true`）时，会话通过 `sudo -n -u root /opt/webshell_sandbox/sandbox-init <args>`（无 `-i`）启动：root 阶段完成 enterCgroup → 预创建 rootfs 挂载点 → resolveSupplementaryGroups → exec `userns-init`（C，root 单线程）执行 `unshare(NS|PID|NET)` → `make-rprivate` → fork → exec `sandbox-init --child`（root）；子进程 `buildRootFS`（bind rootfs/home/NFS/dev/proc）→ `pivot_root` → rlimit(best-effort) → seccomp → `upLoopback` → `dropToUser`（setgroups 主组+补充组 → setgid → setuid）→ exec bash/opencode。沙箱内进程是**宿主真实用户身份**（含补充组，非 root、非 userns root），解决 NFS 因丢失补充组导致 Permission denied 的问题。非沙箱模式（`sandbox.enabled=false`）退回传统 `sudo -n -u <user> -i bash`。
+**沙箱模式启动**：启用沙箱（`sandbox.enabled=true`）时，会话通过 `sudo -n -u root /opt/webshell_sandbox1/sandbox-init <args>`（无 `-i`）启动：root 阶段完成 enterCgroup → 预创建 rootfs 挂载点 → resolveSupplementaryGroups → exec `userns-init`（C，root 单线程）执行 `unshare(NS|PID|NET)` → `make-rprivate` → fork → exec `sandbox-init --child`（root）；子进程 `buildRootFS`（bind rootfs/home/NFS/dev/proc）→ `pivot_root` → rlimit(best-effort) → seccomp → `upLoopback` → `dropToUser`（setgroups 主组+补充组 → setgid → setuid）→ exec bash/opencode。沙箱内进程是**宿主真实用户身份**（含补充组，非 root、非 userns root），解决 NFS 因丢失补充组导致 Permission denied 的问题。非沙箱模式（`sandbox.enabled=false`）退回传统 `sudo -n -u <user> -i bash`。
 
 **退出行为**：
 
@@ -297,6 +316,9 @@ WebSocket 升级时通过 `?mode=` 查询参数决定会话类型（`handler/ws.
 | `output` | 服务端→客户端 | pty 输出字节（base64 编码后放入字符串）          |
 | `close`  | 服务端→客户端 | 会话结束/错误 `{reason}`                          |
 | `session`| 服务端→客户端 | 会话标识 `{id}`（刷新后用于恢复同一终端）         |
+| `auth-request` | 服务端→客户端 | opencode 启动前请求补全缺失 api_key：`{envVars: string[], timeout}` |
+| `auth-response` | 客户端→服务端 | 回传单个 api_key：`{envVar, apiKey}`（逐项发送）   |
+| `auth-cancel`   | 客户端→服务端 | 用户取消补全流程                                  |
 
 恢复会话时前端改为连接 `/ws?session=<id>&username=<user>`（无需一次性 token），服务端据此重新附着到同一 pty 会话。
 
@@ -317,7 +339,7 @@ go test ./...
 
 **沙箱安全**（启用沙箱时）：
 
-- `/opt/webshell_sandbox` 目录属主必须 **root:root 0755**，防止服务用户替换 `sandbox-init` / `userns-init` 二进制提权 root；sudoers 仅放行精确路径 `sandbox-init`；
+- `/opt/webshell_sandbox1` 目录属主必须 **root:root 0755**，防止服务用户替换 `sandbox-init` / `userns-init` 二进制提权 root；sudoers 仅放行精确路径 `sandbox-init`；
 - rootfs 内无 setuid 二进制（如 `su` 已去除 setuid 位），沙箱内 `/etc` 只读（pivot_root + 只读 rootfs）；
 - seccomp 拦截 mount/unshare/setns 及新版挂载 API 等（沙箱内不可再创建命名空间/挂载）；
 - cgroup 限制 memory/cpu/pids 生效，防止资源滥用；

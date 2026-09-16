@@ -40,6 +40,14 @@
   var uploadCancel = document.getElementById("upload-cancel");
   var activeUploadXhr = null; // 当前进行中的上传请求（用于取消）
 
+  // API Key 输入弹窗相关元素（opencode 启动前补全 api_key）。
+  var authOverlay = document.getElementById("auth-overlay");
+  var authFields = document.getElementById("auth-fields");
+  var authOkBtn = document.getElementById("auth-ok-btn");
+  var authCancelBtn = document.getElementById("auth-cancel-btn");
+  // auth 弹窗打开期间置 true，暂停终端输入转发（此时 opencode 尚未启动）。
+  var authModalOpen = false;
+
   var modePanel = document.getElementById("mode-panel");
   var modeUserEl = document.getElementById("mode-user");
   var btnBash = document.getElementById("btn-bash");
@@ -240,6 +248,10 @@
           currentSessionID = sid;
           saveSession(sid, currentUser, currentMode);
         }
+      } else if (msg.type === "auth-request") {
+        // opencode 启动前服务端请求补全缺失的 api_key：弹出输入框。
+        // data.envVars: string[]，data.timeout: 等待秒数（未在 UI 展示）。
+        showAuthModal(msg.data);
       } else if (msg.type === "close") {
         var reason = (msg.data && msg.data.reason) || "unknown";
         term.writeln("\r\n\x1b[31m[closed: " + reason + "]\x1b[0m");
@@ -283,6 +295,8 @@
 
     // 用户输入 -> 发送 input 消息。
     term.onData(function (data) {
+      // auth 弹窗打开期间暂停输入转发（此时 opencode 尚未启动，无实际终端可写）。
+      if (authModalOpen) return;
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "input", data: data }));
       }
@@ -337,6 +351,90 @@
   // 隐藏消息弹窗。
   function hideModal() {
     modalOverlay.style.display = "none";
+  }
+
+  // ===== API Key 输入弹窗（opencode 启动前补全 api_key）=====
+
+  // 显示 API Key 输入弹窗：根据 data.envVars 动态渲染每行
+  // label(envVar) + input[type=password]。
+  // 安全：用 createElement/textContent 渲染 envVar，禁止 innerHTML 拼接
+  // 用户可控串（防 XSS）。
+  function showAuthModal(data) {
+    var envVars = (data && data.envVars) || [];
+    authFields.innerHTML = ""; // 清空旧输入（此处内容全部由下方代码创建）
+
+    for (var i = 0; i < envVars.length; i++) {
+      var envVar = String(envVars[i] || "");
+
+      var field = document.createElement("div");
+      field.className = "auth-field";
+
+      var label = document.createElement("label");
+      label.textContent = envVar;
+      field.appendChild(label);
+
+      var input = document.createElement("input");
+      input.type = "password";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      // 记录该输入框对应的环境变量名，供 authOk 收集时使用。
+      input.dataset.envVar = envVar;
+      field.appendChild(input);
+
+      authFields.appendChild(field);
+    }
+
+    if (envVars.length > 0) {
+      authOverlay.style.display = "flex";
+      authModalOpen = true;
+      // 聚焦第一项的输入框。
+      var first = authFields.querySelector("input");
+      if (first) first.focus();
+    }
+  }
+
+  // 隐藏 API Key 输入弹窗并清空输入（防残留 api_key 显示在 DOM 中）。
+  function hideAuthModal() {
+    authModalOpen = false;
+    authOverlay.style.display = "none";
+    authFields.innerHTML = "";
+  }
+
+  // 确定：收集所有输入框的值，逐项回传 auth-response。
+  // 任一输入为空则提示"请填写全部 API Key"，不发送部分数据。
+  function authOk() {
+    var inputs = authFields.querySelectorAll("input");
+    var items = [];
+    for (var i = 0; i < inputs.length; i++) {
+      var val = inputs[i].value.trim();
+      if (val === "") {
+        showModal("请填写全部 API Key");
+        return;
+      }
+      items.push({ envVar: inputs[i].dataset.envVar || "", apiKey: val });
+    }
+    if (items.length === 0) {
+      hideAuthModal();
+      return;
+    }
+    // api_key 仅通过 WebSocket 消息体传输，不进入 URL/日志。
+    for (var j = 0; j < items.length; j++) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: "auth-response",
+          data: { envVar: items[j].envVar, apiKey: items[j].apiKey },
+        }));
+      }
+    }
+    hideAuthModal();
+  }
+
+  // 取消：通知服务端用户取消补全流程。
+  function authCancel() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "auth-cancel" }));
+    }
+    hideAuthModal();
   }
 
   // 显示上传进度弹窗并重置进度条。
@@ -635,6 +733,10 @@
 
   // 消息弹窗「确定」关闭。
   modalOk.addEventListener("click", hideModal);
+
+  // API Key 弹窗「确定」/「取消」。
+  authOkBtn.addEventListener("click", authOk);
+  authCancelBtn.addEventListener("click", authCancel);
 
   // 上传弹窗「取消上传」：中止当前上传。
   uploadCancel.addEventListener("click", cancelUpload);

@@ -28,7 +28,7 @@ var upgrader = websocket.Upgrader{
 //
 // 无论哪种方式，升级为 WebSocket 后都附着（attach）到 hub 中的会话；连接断开
 // （刷新/断线）时仅分离（detach）而不销毁会话，保留 sessionTTL 等待重连。
-func NewWs(authr *auth.Authenticator, opencodeCfg *auth.OpencodeConfig, sandboxCfg *auth.SandboxConfig, hub *sessionHub) http.HandlerFunc {
+func NewWs(authr *auth.Authenticator, opencodeCfg *auth.OpencodeConfig, codexCfg *auth.CodexConfig, sandboxCfg *auth.SandboxConfig, hub *sessionHub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 1. 尝试恢复已存在的会话（页面刷新后自动重连）。
 		sid := r.URL.Query().Get("session")
@@ -64,21 +64,27 @@ func NewWs(authr *auth.Authenticator, opencodeCfg *auth.OpencodeConfig, sandboxC
 			}
 			username = uname
 
-			// 根据 ?mode= 决定本次会话进入 opencode 还是 bash。
-			// 同步失败只 log、不阻塞登录（仍继续启动 opencode）。
+			// 根据 ?mode= 决定本次会话进入 opencode / codex 还是 bash。
+			// 同步失败只 log、不阻塞登录（仍继续启动对应代理）。
 			mode := r.URL.Query().Get("mode")
 			var effCfg *auth.OpencodeConfig
+			var effCodexCfg *auth.CodexConfig
 			if opencodeCfg != nil && opencodeCfg.Enabled && mode == "opencode" {
 				effCfg = opencodeCfg
 				if err := pty.SyncOpencodeConfig(username, homeDir, opencodeCfg, 15*time.Second); err != nil {
 					log.Printf("ws: sync opencode config for %q failed (non-fatal): %v", username, err)
+				}
+			} else if codexCfg != nil && codexCfg.Enabled && mode == "codex" {
+				effCodexCfg = codexCfg
+				if err := pty.SyncCodexConfig(username, homeDir, codexCfg, 15*time.Second); err != nil {
+					log.Printf("ws: sync codex config for %q failed (non-fatal): %v", username, err)
 				}
 			}
 
 			// 先生成会话 ID（与沙箱 cgroup 命名一致），再创建 pty 会话。
 			sessionID := newSessionID()
 
-			// opencode 模式：启动前补全 opencode.jsonc 引用的 api_key。
+			// opencode / codex 模式：启动前补全配置引用的 api_key。
 			// 此时 WebSocket 已 Upgrade、hubSession 尚未创建（readLoop 未启动），
 			// auth flow 直接读写 conn。缺失 key 时下发 auth-request 弹窗等待用户
 			// 输入，用户取消/超时则发送 close 消息并结束会话。
@@ -89,18 +95,24 @@ func NewWs(authr *auth.Authenticator, opencodeCfg *auth.OpencodeConfig, sandboxC
 				if opencodeCfg != nil && opencodeCfg.AuthTimeout > 0 {
 					authTimeout = time.Duration(opencodeCfg.AuthTimeout) * time.Second
 				}
-				authEnv, aerr = resolveAuthEnv(conn, username, homeDir, effCfg, authTimeout)
-				if aerr != nil {
-					log.Printf("ws: auth env for %q failed: %v", username, aerr)
-					reason := "api key required but canceled or timed out"
-					payload, _ := protocol.CloseMessage(reason).Marshal()
-					_ = conn.WriteMessage(websocket.TextMessage, payload)
-					_ = conn.Close()
-					return
+				authEnv, aerr = resolveAuthEnv(conn, username, homeDir, auth.RequiredEnvVars, authTimeout)
+			} else if effCodexCfg != nil {
+				authTimeout := defaultAuthTimeout
+				if codexCfg != nil && codexCfg.AuthTimeout > 0 {
+					authTimeout = time.Duration(codexCfg.AuthTimeout) * time.Second
 				}
+				authEnv, aerr = resolveAuthEnv(conn, username, homeDir, auth.RequiredCodexEnvVars, authTimeout)
+			}
+			if aerr != nil {
+				log.Printf("ws: auth env for %q failed: %v", username, aerr)
+				reason := "api key required but canceled or timed out"
+				payload, _ := protocol.CloseMessage(reason).Marshal()
+				_ = conn.WriteMessage(websocket.TextMessage, payload)
+				_ = conn.Close()
+				return
 			}
 
-			sess, serr := pty.NewSessionForUserMode(username, homeDir, effCfg, sandboxCfg, sessionID, authEnv)
+			sess, serr := pty.NewSessionForUserMode(username, homeDir, effCfg, effCodexCfg, sandboxCfg, sessionID, authEnv)
 			if serr != nil {
 				log.Printf("pty session create failed: %v", serr)
 				payload, _ := protocol.CloseMessage("failed to start shell: " + serr.Error()).Marshal()

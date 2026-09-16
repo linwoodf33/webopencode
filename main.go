@@ -53,13 +53,13 @@ func main() {
 	})
 
 	// 登录：POST /api/login。
-	http.HandleFunc("/api/login", handler.Login(authr, cfg.Opencode.Enabled))
+	http.HandleFunc("/api/login", handler.Login(authr, cfg.Opencode.Enabled, cfg.Codex.Enabled))
 
 	// 会话仓库：支持页面刷新后恢复同一终端。
 	hub := handler.NewSessionHub()
 
 	// WebSocket 端点（升级前校验一次性 token；或按 sessionID 恢复会话）。
-	http.HandleFunc("/ws", handler.NewWs(authr, &cfg.Opencode, &cfg.Sandbox, hub))
+	http.HandleFunc("/ws", handler.NewWs(authr, &cfg.Opencode, &cfg.Codex, &cfg.Sandbox, hub))
 
 	// 恢复前探测：GET /api/resume?session=<id>&username=<user>。
 	http.HandleFunc("/api/resume", handler.NewResumeHandler(hub))

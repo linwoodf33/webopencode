@@ -1,6 +1,6 @@
 # Web Shell
 
-一个基于 Web 的远程终端服务：用户通过浏览器登录（AD/LDAPS 强认证）后，可进入交互式终端会话。支持在登录后选择打开**普通 Bash 终端**或 **opencode TUI**，并可自动将共享的 opencode 配置同步到各用户的家目录。
+一个基于 Web 的远程终端服务：用户通过浏览器登录（AD/LDAPS 强认证）后，可进入交互式终端会话。支持在登录后选择打开**普通 Bash 终端**、**opencode TUI** 或 **codex TUI**，并可自动将共享的 opencode / codex 配置同步到各用户的家目录。
 
 支持 **Linux 沙箱隔离**（user namespace + pivot_root + cgroup + seccomp）：沙箱内进程以宿主真实用户身份运行（保留补充组），解决 NFS 因丢失补充组导致 Permission denied 的问题。
 
@@ -13,9 +13,11 @@
 
 - **AD 登录认证**：通过 LDAPS 连接域控，支持账号名或邮箱登录；可开启密码强认证（用户 DN + 密码 bind）。
 - **一次性 token**：登录成功签发一次性 token（默认 5 分钟有效），WebSocket 升级前校验并消费，防重放。
-- **会话模式选择**：登录成功后，若启用了 opencode，前端展示「打开 Bash / 打开 OpenCode」选择面板；用户选择后才建立终端连接。
+- **会话模式选择**：登录成功后，若启用了 opencode 或 codex，前端展示「打开 Bash / 打开 OpenCode / 打开 Codex」选择面板；用户选择后才建立终端连接。
 - **opencode 集成**：选择 opencode 后，以登录用户身份在其家目录启动 opencode TUI；退出 opencode 即完全结束会话（不退回 bash）。
+- **codex 集成**：选择 codex 后，以登录用户身份在其家目录启动 codex TUI（经 `sudo -n -E -u <user> -i bash -c 'cd <home> && <codexPath>'`）；退出 codex 即完全结束会话（不退回 bash）。
 - **配置同步**：登录时可将共享的 opencode 配置（`skills/` 与 `opencode.jsonc`）同步到用户 `~/.config/opencode`。用户首次初始化后（已存在 `skills` 目录）即跳过同步，保留其已有配置。
+- **codex 配置同步**：登录时可将共享的 codex 配置（`/share/apps/.codex-config/`，含 `config.toml`）同步到用户 **`~/.codex`**（注意不是 `~/.config/codex`）。用户首次初始化后（已存在 `config.toml`）即跳过同步，保留其已有配置；**白名单同步**：只复制 `config.toml` 与 `skills/`，绝不同步任何运行态/敏感文件（sqlite/jsonl/日志/会话等）。
 - **以目标用户身份运行**：沙箱模式（`sandbox.enabled=true`）下通过 `sudo -n -u root sandbox-init` 启动沙箱，沙箱内进程以**真实用户身份**（含补充组）运行；非沙箱模式（`sandbox.enabled=false`）退回传统 `sudo -n -u <user> -i bash` 切换登录用户，确保文件归属与权限正确。
 - **终端字号调整**：终端工具条提供 `A-`/`A+` 按钮调整字号（8–32px，步进 2px），选择持久化到 `localStorage`，下次登录自动恢复。
 - **终端主题切换**：工具条下拉框内置 8 个流行主题（VS Code Dark、Dracula、Monokai、Nord、Solarized Dark、One Dark、Tokyo Night、GitHub Light），实时切换并持久化，下次登录自动恢复。
@@ -25,7 +27,7 @@
 - **/etc/hosts 映射**：`bind_hosts` 可将宿主机 `/etc/hosts` 映射进沙箱，解决沙箱内主机名解析。
 - **/etc/resolv.conf 映射**：`bind_resolv` 可将宿主机 `/etc/resolv.conf` 映射进沙箱，解决沙箱内域名无法解析（`network: full` 时生效最佳）。
 - **代理支持**：`http_proxy` / `https_proxy` / `no_proxy` 非空时注入沙箱进程环境变量（小写+大写两套），沙箱内网络请求可走代理（需 `network: full` 沙箱有外部网络）。
-- **沙箱内体验**：中文正常（`LANG=en_US.utf8`）、真实用户名提示符、vim（rootfs 内）、opencode（rootfs 内 + 共享配置 bind）均可用。
+- **沙箱内体验**：中文正常（`LANG=en_US.utf8`）、真实用户名提示符、vim（rootfs 内）、opencode / codex（rootfs 内 + 共享配置同步）均可用。
 
 ## 目录结构
 
@@ -113,6 +115,20 @@ opencode:
 > 弹窗让用户补全（见「WebSocket 协议」的 `auth-request`/`auth-response`）。**硬编码 key
 > 将无法触发补全机制**，且会随配置同步泄露给所有用户，请勿硬编码。
 
+# codex 模式：登录后由用户选择进入 codex TUI 或 bash
+codex:
+  enabled: true                    # true=展示「打开 Bash / 打开 Codex」选择面板
+  path: "/share/apps/.codex-standalone/codex"  # codex 可执行文件路径
+  sync_from: "/share/apps/.codex-config"       # 共享配置源目录（同步到 ~/.codex，含 config.toml）
+  overwrite: true                  # 以 ~/.codex/config.toml 存在性标记为主，overwrite 影响甚微
+
+> **codex 的 api_key 必须用 `env_key` 引用**：codex 配置（`~/.codex/config.toml`）中的
+> `model_providers.<id>.env_key = "XXX_API_KEY"` 命名一个环境变量，codex 运行时从其取值
+> 作为 API Key（如 `env_key = "YANFENG_API_KEY"`）。Web Shell 会读取该引用，若用户
+> `~/.auth.json` 缺失对应 api_key，则在 codex 启动前弹窗让用户补全（复用
+> `auth-request`/`auth-response` 机制）。**硬编码 key 将无法触发补全机制**，且会随配置
+> 同步泄露给所有用户，请勿硬编码。
+
 # Linux 沙箱（sandbox-init 由 sudoers 以 root 启动，作为唯一提权入口）
 sandbox:
   enabled: false                  # true 启用沙箱；false 退回传统 sudo 切用户模式
@@ -139,6 +155,8 @@ sandbox:
 ```
 
 > 配置同步仅在用户首次初始化（`~/.config/opencode/skills` 不存在）时执行；一旦 `skills` 目录已存在，则跳过全部同步（opencode.jsonc 与 skills 均不覆盖），保留用户已有配置。`overwrite` 仅在首次初始化时生效。
+>
+> codex 配置同步同理：仅在用户首次初始化（`~/.codex/config.toml` 不存在）时执行；一旦 `config.toml` 已存在则整体跳过，保留用户已有配置。采用**白名单同步**：只复制 `config.toml` 与 `skills/`，绝不同步任何运行态/敏感文件（源目录即使混入 `*.sqlite`/`*.jsonl`/日志/会话等也不会复制）。`overwrite` 对 codex 影响甚微（以 config.toml 存在性标记为主）。
 
 **sandbox 配置块字段说明**：
 
@@ -264,12 +282,14 @@ ease ALL=(root) NOPASSWD: /opt/webshell_sandbox1/sandbox-init
 | 配置 `/opt/webshell/config.yaml` | 服务用户可读（含 AD 密码，建议 `0600`） | `chown ease:ease; chmod 600` |
 | 工作目录 `/opt/webshell` | 服务用户可读、可进入 | |
 
-### 3. opencode 相关资源（供服务用户读取）
+### 3. opencode / codex 相关资源（供服务用户读取）
 
 | 路径 | 权限要求 |
 | ---- | -------- |
 | opencode 二进制 `/opt/opencode/bin/opencode` | 所有用户可执行（含服务用户） |
 | 配置源目录 `/opt/opencode-config`（含 `skills/` 与 `opencode.jsonc`） | 服务用户可读（`sync_from` 指向） |
+| codex 二进制 `/share/apps/.codex-standalone/codex` | 所有用户可执行（含服务用户） |
+| 配置源目录 `/share/apps/.codex-config`（含 `config.toml`） | 服务用户可读（`sync_from` 指向） |
 
 ### 4. 服务用户 shell 说明
 
@@ -294,20 +314,22 @@ ease ALL=(root) NOPASSWD: /opt/webshell_sandbox1/sandbox-init
 WebSocket 升级时通过 `?mode=` 查询参数决定会话类型（`handler/ws.go`）：
 
 - `mode=opencode` 且 opencode 已启用 → 先同步配置，再以该用户启动 opencode TUI；
-- 其余情况（未传 / `mode=bash` / opencode 未启用）→ 直接进入该用户的 bash。
+- `mode=codex` 且 codex 已启用 → 先同步配置，再以该用户启动 codex TUI；
+- 其余情况（未传 / `mode=bash` / 对应代理未启用）→ 直接进入该用户的 bash。
 
 **沙箱模式启动**：启用沙箱（`sandbox.enabled=true`）时，会话通过 `sudo -n -u root /opt/webshell_sandbox1/sandbox-init <args>`（无 `-i`）启动：root 阶段完成 enterCgroup → 预创建 rootfs 挂载点 → resolveSupplementaryGroups → exec `userns-init`（C，root 单线程）执行 `unshare(NS|PID|NET)` → `make-rprivate` → fork → exec `sandbox-init --child`（root）；子进程 `buildRootFS`（bind rootfs/home/NFS/dev/proc）→ `pivot_root` → rlimit(best-effort) → seccomp → `upLoopback` → `dropToUser`（setgroups 主组+补充组 → setgid → setuid）→ exec bash/opencode。沙箱内进程是**宿主真实用户身份**（含补充组，非 root、非 userns root），解决 NFS 因丢失补充组导致 Permission denied 的问题。非沙箱模式（`sandbox.enabled=false`）退回传统 `sudo -n -u <user> -i bash`。
 
 **退出行为**：
 
 - **bash 模式**：退出 bash 即结束会话，前端回到登录界面；
-- **opencode 模式**：退出 opencode TUI 即完全结束会话（不退回 bash），前端回到登录界面。
+- **opencode 模式**：退出 opencode TUI 即完全结束会话（不退回 bash），前端回到登录界面；
+- **codex 模式**：退出 codex TUI 即完全结束会话（不退回 bash），前端回到登录界面。
 
 **刷新保持会话**：页面刷新或短暂断线时，WebSocket 连接断开但 pty 会话会保留在服务端会话仓库（`handler/session_hub.go`）中一段时间（默认 5 分钟），前端把会话标识存入 `sessionStorage`，刷新后自动通过 `/api/resume` 探测并重连到同一终端——正在运行的进程（vim、命令等）不丢失。关闭标签页后 `sessionStorage` 清除，会话超时后被巡检自动回收。
 
 ## WebSocket 协议
 
-`/ws?token=<token>&mode=<bash|opencode>` 升级后，消息为 JSON 信封（`protocol/message.go`）：
+`/ws?token=<token>&mode=<bash|opencode|codex>` 升级后，消息为 JSON 信封（`protocol/message.go`）：
 
 | 类型     | 方向         | 说明                                             |
 | -------- | ------------ | ------------------------------------------------ |
@@ -316,7 +338,7 @@ WebSocket 升级时通过 `?mode=` 查询参数决定会话类型（`handler/ws.
 | `output` | 服务端→客户端 | pty 输出字节（base64 编码后放入字符串）          |
 | `close`  | 服务端→客户端 | 会话结束/错误 `{reason}`                          |
 | `session`| 服务端→客户端 | 会话标识 `{id}`（刷新后用于恢复同一终端）         |
-| `auth-request` | 服务端→客户端 | opencode 启动前请求补全缺失 api_key：`{envVars: string[], timeout}` |
+| `auth-request` | 服务端→客户端 | opencode/codex 启动前请求补全缺失 api_key：`{envVars: string[], timeout}` |
 | `auth-response` | 客户端→服务端 | 回传单个 api_key：`{envVar, apiKey}`（逐项发送）   |
 | `auth-cancel`   | 客户端→服务端 | 用户取消补全流程                                  |
 
@@ -328,7 +350,7 @@ WebSocket 升级时通过 `?mode=` 查询参数决定会话类型（`handler/ws.
 go test ./...
 ```
 
-当前测试覆盖 `auth` 包（配置加载默认值、必填项校验、YAML 解析等）。
+当前测试覆盖 `auth` 包（配置加载默认值、必填项校验、YAML 解析、codex env_key 提取）、`pty` 包（syncCodexCommand 命令形态）、`sandbox` 包（validate 对 codex 分支的校验）等。
 
 ## 安全说明
 

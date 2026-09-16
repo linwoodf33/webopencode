@@ -2,7 +2,7 @@
 
 本文档描述如何将 **WebShell + Linux 沙箱隔离系统** 部署到一台新的第三方服务器。
 系统基于 Go WebShell（AD 认证）+ 轻量级 Linux 沙箱（mount/PID/net namespace + pivot_root + cgroup + seccomp），
-沙箱内以宿主真实用户身份运行（保留补充组），支持 NFS bind、/etc/hosts 映射、vim、opencode 等。
+沙箱内以宿主真实用户身份运行（保留补充组），支持 NFS bind、/etc/hosts 映射、vim、opencode、codex 等。
 
 ---
 
@@ -111,6 +111,19 @@ cp -a /share/apps/.opencode/bin/opencode $ROOT/share/apps/.opencode/bin/
 # 递归拷贝 opencode 的动态库依赖（ldd 逐个拷贝到对应路径）
 ```
 
+### 4. 可选：加入 codex 二进制到 rootfs
+若需要在沙箱内运行 codex，需把 codex 二进制及其依赖拷入 rootfs（路径须与 `config.yaml` 的
+`codex.path` 一致，默认为 `/share/apps/.codex-standalone/codex`）：
+```bash
+ROOT=/opt/runner/rootfs/base
+mkdir -p $ROOT/share/apps/.codex-standalone
+cp -a /share/apps/.codex-standalone/codex $ROOT/share/apps/.codex-standalone/codex
+# 递归拷贝 codex 的动态库依赖（ldd 逐个拷贝到对应路径）
+```
+> codex 的共享配置（`/share/apps/.codex-config/`）**无需** bind 进 rootfs：Web Shell 在登录
+> 时会将其同步到用户 `~/.codex`，而用户家目录已 bind 进沙箱，故沙箱内 `~/.codex/config.toml`
+> 天然可见。
+
 ---
 
 ## 五、配置
@@ -135,6 +148,12 @@ opencode:
   enabled: true
   path: "/share/apps/.opencode/bin/opencode"
   sync_from: "/share/apps/.opencode-config"
+  overwrite: true
+
+codex:
+  enabled: true
+  path: "/share/apps/.codex-standalone/codex"
+  sync_from: "/share/apps/.codex-config"
   overwrite: true
 
 sandbox:
@@ -194,6 +213,24 @@ mount -t nfs easemgt:/data/apps /share/apps
 - opencode 二进制：`/share/apps/.opencode/bin/opencode`（沙箱内需 rootfs 内可执行）
 - opencode 共享配置：`/share/apps/.opencode-config`（含 `opencode.jsonc` + `skills/`）
 
+### 3. codex 二进制与配置
+- codex 二进制：`/share/apps/.codex-standalone/codex`（非沙箱与沙箱均需可执行）
+- codex 共享配置：`/share/apps/.codex-config`（含 `config.toml` 与 `skills/`），登录时同步到用户 `~/.codex`
+
+**codex 配置同步语义（白名单）**：
+- 目标目录为 **`~/.codex`**（注意不是 `~/.config/codex`）；源目录为 `/share/apps/.codex-config/`。
+- 幂等标记：用户 `~/.codex/config.toml` 已存在即**整体跳过**同步（保留用户已有配置与凭据）。
+- **白名单同步**：只复制 `config.toml` 与 `skills/` 两个配置项，绝不同步任何运行态/敏感文件
+  （`*.sqlite`/`*.jsonl`/`*.db*`/日志/会话/`installation_id`/`version.json`/`shell_snapshots/`/`thread-writer-locks/`/`tmp/` 等一律不复制）。源目录即使混入运行态文件也不会误同步给用户。
+- 源 `config.toml` 需对目标用户可读（若为 root 600，`cp` 会失败、同步失败仅 log 不阻塞）；部署侧需 `chmod 644 /share/apps/.codex-config/config.toml`。
+- 同步经 `sudo -n -u <user> -i bash -c '...'` 以目标用户身份执行，复制出的文件归用户所有。
+
+**codex 的 api_key 约束（env_key）**：共享 `config.toml` 中的 api_key 必须用
+`model_providers.<id>.env_key = "XXX_API_KEY"` 引用环境变量（如
+`env_key = "YANFENG_API_KEY"`），**禁止硬编码 key**。Web Shell 读取该引用，若用户
+`~/.auth.json` 缺失对应 api_key，则在 codex 启动前弹窗补全并注入 codex 进程环境
+（非沙箱 `sudo -E` 透传、沙箱 `.auth.env`）。硬编码 key 无法触发补全机制，且会随配置同步泄露给所有用户。
+
 ---
 
 ## 七、系统配置（sudoers / cgroup / systemd）
@@ -212,11 +249,12 @@ visudo -c   # 校验语法
 > **注意**：若现有 `/etc/sudoers.d/ease` 有 `ease ALL=(ALL,!root) NOPASSWD: ALL`（旧版 WebShell 用），
 > 保留它（用于非沙箱会话）；新规则精确到 sandbox-init 路径，互不冲突。
 >
-> **opencode API Key 透传（非沙箱模式）**：opencode 模式经 `sudo -n -E -u <user> -i bash -c ...`
+> **opencode / codex API Key 透传（非沙箱模式）**：opencode / codex 模式经 `sudo -n -E -u <user> -i bash -c ...`
 > 启动，`-E` 会把服务进程环境（含补全的 API Key）透传给目标用户进程。默认 sudoers 的
 > `env_reset` 会被 `-E` 覆盖，通常无需额外配置；**若**部署侧显式限制了 `-E`/环境保留
 > （例如自定义 `env_keep` 白名单或 `secure_path` 收紧），请确保相关变量（如
-> `ANTHROPIC_API_KEY`、`OPENAI_API_KEY` 等 opencode.jsonc 中 `{env:XXX}` 引用的变量）
+> `ANTHROPIC_API_KEY`、`OPENAI_API_KEY` 等 opencode.jsonc 中 `{env:XXX}` 引用的变量，
+> 以及 codex config.toml 中 `env_key` 引用的变量如 `YANFENG_API_KEY`）
 > 不被过滤，否则需在 `/etc/sudoers.d/` 增加 `Defaults: ease env_keep += "XXX_API_KEY"`。
 
 ### 2. cgroup 根目录
@@ -281,6 +319,12 @@ sudo -n -u root /opt/webshell_sandbox1/sandbox-init --uid 1000 --gid 1000 \
 - `vim` 可用
 - `ls /share/apps/.opencode-config/` 可见配置
 - NFS bind 路径可见（若配置）
+
+**codex 验证**（若启用 `codex.enabled: true`）：
+- 登录响应应含 `codex_enabled: true`，前端显示「打开 Codex」按钮；
+- 首次进入 codex 后，`ls ~/.codex/` 应含 `config.toml` 且属主为登录用户（来自 `/share/apps/.codex-config/`）；
+- 若 `config.toml` 定义了 `env_key` 而用户 `~/.auth.json` 缺失对应 api_key，会弹出补全弹窗，补全后进入 codex TUI（无 ChatGPT 登录界面）；
+- 第二次进入 codex：不重复同步，用户在 `~/.codex/config.toml` 的改动被保留；`~/.codex/` 下无 `auth.json` 覆盖、无任何运行态文件（sqlite/jsonl/日志/会话等）。
 
 ---
 

@@ -25,13 +25,14 @@
     </form>
   </div>
 
-  <!-- 模式选择面板：登录成功后选择打开 bash 还是 opencode -->
+  <!-- 模式选择面板：登录成功后选择打开 bash / opencode / codex -->
   <div id="mode-panel" style="display:none;">
     <div id="mode-box">
       <h1>选择会话模式</h1>
       <p id="mode-user"></p>
       <button type="button" id="btn-bash">打开 Bash 终端</button>
-      <button type="button" id="btn-opencode">打开 OpenCode</button>
+      <button type="button" id="btn-opencode" style="display:none;">打开 OpenCode</button>
+      <button type="button" id="btn-codex" style="display:none;">打开 Codex</button>
     </div>
   </div>
 
@@ -73,7 +74,7 @@
   <div id="auth-overlay" style="display:none;">
     <div id="auth-box">
       <div id="auth-title">请输入 API Key</div>
-      <p id="auth-hint">以下环境变量在 opencode 配置中被引用，请输入对应的 API Key：</p>
+      <p id="auth-hint">以下环境变量在 AI 代理配置中被引用，请输入对应的 API Key：</p>
       <div id="auth-fields"></div>
       <div id="auth-actions">
         <button type="button" id="auth-cancel-btn">取消</button>

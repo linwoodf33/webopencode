@@ -28,6 +28,14 @@ var authEnvVarRe = regexp.MustCompile(`\$\{env\.([A-Za-z_][A-Za-z0-9_]*)\}`)
 // 合并结果另有去重兜底。变量名限定为 C 标识符风格，防注入。
 var envBraceRe = regexp.MustCompile(`\{env:([A-Za-z_][A-Za-z0-9_]*)\}`)
 
+// codexEnvKeyRe 匹配 codex config.toml 中的 `env_key = "VAR"` 赋值形态
+// （TOML 双引号基本字符串）。变量名限定为 C 标识符风格，防注入。
+// 只做行锚定的简单赋值匹配（不做完整 TOML 解析，避免新增依赖）：
+//   - ^\s* 允许行首空白（TOML 缩进）；
+//   - env_key 前后空格可选；
+//   - 值必须是双引号包裹的合法变量名。
+var codexEnvKeyRe = regexp.MustCompile(`(?m)^\s*env_key\s*=\s*"([A-Za-z_][A-Za-z0-9_]*)"`)
+
 // defaultAuthFile 返回用户家目录下的 .auth.json 绝对路径。
 func defaultAuthFile(homeDir string) string {
 	return homeDir + "/" + DefaultAuthFileName
@@ -211,6 +219,47 @@ func RequiredEnvVars(username, homeDir string) []string {
 		return nil
 	}
 	return ExtractEnvVars(content)
+}
+
+// ExtractCodexEnvKeys 从 codex config.toml 内容中提取所有 `env_key = "VAR"` 引用
+// 的环境变量名，按文档出现顺序保序去重。
+//
+// 逐行扫描，跳过 `#` 注释行与空行；变量名限定为 C 标识符风格（正则 codexEnvKeyRe
+// 已保证），非法名自然不匹配。不做完整 TOML 解析（避免新增依赖）：env_key 是简单
+// 赋值形态，行锚定正则足够，与现有「对配置内容做正则」的风格一致。
+func ExtractCodexEnvKeys(content []byte) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, line := range strings.Split(string(content), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		m := codexEnvKeyRe.FindStringSubmatch(line)
+		if len(m) != 2 {
+			continue
+		}
+		name := m[1]
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// RequiredCodexEnvVars 读取用户 ~/.codex/config.toml 并提取其 `env_key` 引用的
+// 环境变量名（以用户身份读取，复用 readFileAsUser）。文件缺失/读取失败/解析失败
+// 时返回 nil（不阻断登录，由调用方决定是否触发补全流程）。
+func RequiredCodexEnvVars(username, homeDir string) []string {
+	if username == "" || homeDir == "" {
+		return nil
+	}
+	content, err := readFileAsUser(username, homeDir+"/.codex/config.toml")
+	if err != nil {
+		return nil
+	}
+	return ExtractCodexEnvKeys(content)
 }
 
 // shellQuote 将字符串包进单引号，供拼接到 bash -c 命令行使用（规避特殊字符注入）。

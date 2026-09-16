@@ -120,16 +120,22 @@ func collectAPIKeys(conn *websocket.Conn, username, homeDir string,
 	return result, nil
 }
 
-// resolveAuthEnv 汇总 opencode 启动所需的环境变量（api_key）。
+// resolveAuthEnv 汇总 AI 代理（opencode/codex）启动所需的环境变量（api_key）。
 //
-// 流程：读取 opencode.jsonc 引用列表 -> 读 .auth.json 已有 key -> 计算缺失项 ->
-// 缺失时经 collectAPIKeys 与用户交互补全 -> 返回 {envVar: apiKey} map（含已有与新增）。
-// 未进入 opencode 模式（effCfg == nil）或配置无 env 引用时返回 (nil, nil)。
-func resolveAuthEnv(conn *websocket.Conn, username, homeDir string, effCfg *auth.OpencodeConfig, timeout time.Duration) (map[string]string, error) {
-	if effCfg == nil {
+// 流程：读取配置文件（opencode.jsonc / config.toml）的 env 引用列表 -> 读
+// .auth.json 已有 key -> 计算缺失项 -> 缺失时经 collectAPIKeys 与用户交互补全 ->
+// 返回 {envVar: apiKey} map（含已有与新增）。
+//
+// requiredVars 参数化「env 引用来源」：opencode 传 auth.RequiredEnvVars，
+// codex 传 auth.RequiredCodexEnvVars。其余逻辑（collectAPIKeys、防注入白名单、
+// ~/.auth.json 幂等写回、超时清理读 deadline）与 mode 无关，完全复用。
+// 未进入代理模式（requiredVars 为 nil）或配置无 env 引用时返回 (nil, nil)。
+func resolveAuthEnv(conn *websocket.Conn, username, homeDir string,
+	requiredVars func(string, string) []string, timeout time.Duration) (map[string]string, error) {
+	if requiredVars == nil {
 		return nil, nil
 	}
-	envVars := auth.RequiredEnvVars(username, homeDir)
+	envVars := requiredVars(username, homeDir)
 	if len(envVars) == 0 {
 		return nil, nil
 	}

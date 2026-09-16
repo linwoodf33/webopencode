@@ -46,6 +46,29 @@ opencode:
   sync_from: "/opt/opencode-config"
   overwrite: true
 
+# codex 模式：登录后由用户选择进入 codex TUI 或 bash
+# enabled: true 进入 codex；false（缺省）退回 bash
+# path: codex 可执行文件绝对路径（缺省给默认值）
+# sync_from: codex 共享配置源目录，同步到用户 ~/.codex（注意不是 ~/.config/codex），缺省给默认值
+#   白名单同步：只同步 config.toml 与 skills/，绝不同步任何运行态/敏感文件
+#   （*.sqlite/*.jsonl/日志/会话/installation_id/version.json 等）。
+# overwrite: true 全量覆盖；false 仅在目标不存在时复制。
+#   注意：codex 模式下以 ~/.codex/config.toml 存在性标记为主（已存在即整体跳过），
+#   overwrite 影响甚微，字段仅为与 opencode 对齐保留。
+# auth_timeout: 启动前 api_key 补全弹窗的等待超时（秒），0 或缺省走默认 60
+# auth_file: 用户 api_key 存储文件名（位于用户家目录），缺省 ".auth.json"
+#
+# 注意：codex 配置（~/.codex/config.toml）中的 api_key 必须用 env_key 引用环境变量
+# （如 model_providers.<id>.env_key = "YANFENG_API_KEY"），禁止硬编码 key。Web Shell
+# 会读取该引用，若用户 ~/.auth.json 缺失对应 api_key，则在 codex 启动前弹窗让用户补全
+# （复用 opencode 的 auth-request/auth-response 机制）。硬编码 key 将无法触发本机制，
+# 且会随配置同步泄露给所有用户。
+codex:
+  enabled: false
+  path: "/share/apps/.codex-standalone/codex"
+  sync_from: "/share/apps/.codex-config"
+  overwrite: true
+
 # Linux 沙箱（sandbox-init 由 sudoers 以 root 启动，作为唯一提权入口）
 # enabled: true 启用沙箱；false（缺省）退回传统 sudo 切用户模式
 # init_path: sandbox-init 二进制绝对路径（缺省给默认值）

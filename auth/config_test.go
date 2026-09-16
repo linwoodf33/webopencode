@@ -185,6 +185,90 @@ opencode:
 	}
 }
 
+func TestLoadConfigCodexDefaults(t *testing.T) {
+	// 未显式设置 codex 时：enabled=false，path/sync_from 走默认，overwrite 缺省 true。
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Codex.Enabled {
+		t.Error("codex.enabled should default to false")
+	}
+	if cfg.Codex.Path != DefaultCodexPath {
+		t.Errorf("codex.path = %q, want default %q", cfg.Codex.Path, DefaultCodexPath)
+	}
+	if cfg.Codex.SyncFrom != DefaultCodexSyncFrom {
+		t.Errorf("codex.sync_from = %q, want default %q", cfg.Codex.SyncFrom, DefaultCodexSyncFrom)
+	}
+	if !cfg.Codex.OverwriteEnabled() {
+		t.Error("codex.overwrite should default to true")
+	}
+}
+
+func TestLoadConfigCodexExplicit(t *testing.T) {
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+codex:
+  enabled: true
+  path: "/share/apps/.codex-standalone/codex"
+  sync_from: "/share/apps/.codex-config"
+  overwrite: false
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.Codex.Enabled {
+		t.Error("codex.enabled should be true")
+	}
+	if cfg.Codex.Path != "/share/apps/.codex-standalone/codex" {
+		t.Errorf("codex.path = %q", cfg.Codex.Path)
+	}
+	if cfg.Codex.SyncFrom != "/share/apps/.codex-config" {
+		t.Errorf("codex.sync_from = %q", cfg.Codex.SyncFrom)
+	}
+	if cfg.Codex.OverwriteEnabled() {
+		t.Error("codex.overwrite should be false")
+	}
+}
+
+func TestLoadConfigCodexEnabledEmptyFallback(t *testing.T) {
+	// codex enabled 但 path/sync_from 为空 -> 默认值兜底。
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+codex:
+  enabled: true
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.Codex.Enabled {
+		t.Error("codex.enabled should be true")
+	}
+	if cfg.Codex.Path != DefaultCodexPath {
+		t.Errorf("codex.path = %q, want default %q", cfg.Codex.Path, DefaultCodexPath)
+	}
+	if cfg.Codex.SyncFrom != DefaultCodexSyncFrom {
+		t.Errorf("codex.sync_from = %q, want default %q", cfg.Codex.SyncFrom, DefaultCodexSyncFrom)
+	}
+}
+
 func TestLoadConfigFileNotFound(t *testing.T) {
 	_, err := LoadConfig(filepath.Join(t.TempDir(), "nope.yaml"))
 	if !errors.Is(err, os.ErrNotExist) {

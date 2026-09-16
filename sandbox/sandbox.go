@@ -43,8 +43,9 @@ type Config struct {
 	Groups         []int           // 真实用户的补充组 GID 列表（含主组，降权时 setgroups 保留）
 	Home           string          // 真实家目录（绝对路径，以 /home/ 开头）
 	Session        string          // 会话 ID（^[a-zA-Z0-9_-]+$，用于 cgroup 名，防路径注入）
-	Program        string          // bash | opencode
+	Program        string          // bash | opencode | codex
 	OpencodePath   string          // --program=opencode 时的可执行文件绝对路径
+	CodexPath      string          // --program=codex 时的可执行文件绝对路径
 	Rootfs         string          // base rootfs 路径
 	Network        string          // none | loopback | full
 	Memory         string          // cgroup memory.max（如 "512M"）
@@ -185,6 +186,9 @@ func childArgs(cfg *Config) []string {
 	}
 	if cfg.Program == "opencode" {
 		args = append(args, "--opencode-path", cfg.OpencodePath)
+	}
+	if cfg.Program == "codex" {
+		args = append(args, "--codex-path", cfg.CodexPath)
 	}
 	if cfg.AuthEnvFile != "" {
 		args = append(args, "--auth-env-file", cfg.AuthEnvFile)
@@ -342,12 +346,15 @@ func validate(cfg *Config) error {
 		return errors.New("session contains invalid characters")
 	}
 	switch cfg.Program {
-	case "bash", "opencode":
+	case "bash", "opencode", "codex":
 	default:
-		return errors.New("program must be 'bash' or 'opencode'")
+		return errors.New("program must be 'bash' or 'opencode' or 'codex'")
 	}
 	if cfg.Program == "opencode" && cfg.OpencodePath == "" {
 		return errors.New("opencode path is empty")
+	}
+	if cfg.Program == "codex" && cfg.CodexPath == "" {
+		return errors.New("codex path is empty")
 	}
 	switch cfg.Network {
 	case "none", "loopback", "full":
@@ -830,7 +837,7 @@ func upLoopback() error {
 	return nil
 }
 
-// execProgram 以真实用户身份执行 bash 或 opencode，并设置环境。
+// execProgram 以真实用户身份执行 bash / opencode / codex，并设置环境。
 func execProgram(cfg *Config) error {
 	var argv []string
 	var path string
@@ -838,6 +845,9 @@ func execProgram(cfg *Config) error {
 	case "opencode":
 		path = cfg.OpencodePath
 		argv = []string{cfg.OpencodePath}
+	case "codex":
+		path = cfg.CodexPath
+		argv = []string{cfg.CodexPath}
 	default:
 		path = "/bin/bash"
 		argv = []string{"/bin/bash", "-i"}

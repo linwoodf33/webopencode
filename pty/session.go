@@ -112,29 +112,36 @@ func startWithPty(cmd *exec.Cmd) (*os.File, error) {
 //
 // username 与 homeDir 必须由调用方完成系统存在性校验；若为空返回错误。
 func NewSessionForUser(username, homeDir string) (*Session, error) {
-	return NewSessionForUserMode(username, homeDir, nil, nil, "", nil)
+	return NewSessionForUserMode(username, homeDir, nil, nil, nil, "", nil)
 }
 
 // NewSessionForUserMode 以指定 Linux 用户启动一个 pty 会话。
 //
-// opencode 为 nil 或 opencode.Enabled == false 时，行为与 NewSessionForUser 一致
-// （进入 bash，逃生通道为 bash 本身）。
+// opencode / codex 均为 nil 或各自 Enabled == false 时，行为与 NewSessionForUser
+// 一致（进入 bash，逃生通道为 bash 本身）。判定优先级：opencode > codex > bash
+// （实际由 ws.go 保证只传其一）。
 //
 // opencode.Enabled == true 时，通过
 //
-//	/usr/bin/sudo -n -u <username> -i bash -c 'cd <homeDir> && <opencodePath>'
+//	/usr/bin/sudo -n -E -u <username> -i bash -c 'cd <homeDir> && <opencodePath>'
 //
 // 启动 opencode TUI（以登录用户身份运行、工作目录为用户家目录）。外层仍是 bash，
 // 但 opencode 退出后 bash -c 即结束，从而完全退出登录会话（不退回 bash）。
+//
+// codex.Enabled == true 时，通过
+//
+//	/usr/bin/sudo -n -E -u <username> -i bash -c 'cd <homeDir> && <codexPath>'
+//
+// 启动 codex TUI（与 opencode 同形态）。
 //
 // sandboxCfg 非 nil 且 Enabled == true 时，改为经 setuid-root 的 sandbox-init
 // 启动 Linux 用户命名空间沙箱（见下）。sandboxCfg 为 nil / 未启用时，保持上述
 // 传统 sudo 路径，零回归。sessionID 用于沙箱 cgroup 命名，仅在沙箱模式下使用。
 //
 // username 与 homeDir 必须由调用方完成系统存在性校验；若为空返回错误。
-// authEnv 为 opencode 模式启动前补齐的 {环境变量: api_key} map，注入到 opencode
-// 进程环境；非 opencode 模式 / 无补齐项时传 nil 或空 map。
-func NewSessionForUserMode(username, homeDir string, opencode *auth.OpencodeConfig, sandboxCfg *auth.SandboxConfig, sessionID string, authEnv map[string]string) (*Session, error) {
+// authEnv 为代理模式启动前补齐的 {环境变量: api_key} map，注入到代理进程环境；
+// 非代理模式 / 无补齐项时传 nil 或空 map。
+func NewSessionForUserMode(username, homeDir string, opencode *auth.OpencodeConfig, codex *auth.CodexConfig, sandboxCfg *auth.SandboxConfig, sessionID string, authEnv map[string]string) (*Session, error) {
 	if username == "" {
 		return nil, errors.New("empty username")
 	}
@@ -149,14 +156,16 @@ func NewSessionForUserMode(username, homeDir string, opencode *auth.OpencodeConf
 
 	// 沙箱模式：经 sandbox-init 启动用户命名空间沙箱。
 	if sandboxCfg != nil && sandboxCfg.Enabled {
-		return newSandboxSession(username, homeDir, opencode, sandboxCfg, sessionID, sudoPath, authEnv)
+		return newSandboxSession(username, homeDir, opencode, codex, sandboxCfg, sessionID, sudoPath, authEnv)
 	}
 
 	// 构造 sudo 命令参数。
 	// - bash 模式：`sudo -n -u <user> -i bash`
 	// - opencode 模式：`sudo -n -E -u <user> -i bash -c 'cd <homeDir> && <opencodePath>'`
+	// - codex 模式：`sudo -n -E -u <user> -i bash -c 'cd <homeDir> && <codexPath>'`
 	var cmd *exec.Cmd
-	if opencode != nil && opencode.Enabled {
+	switch {
+	case opencode != nil && opencode.Enabled:
 		if opencode.Path == "" {
 			return nil, errors.New("opencode enabled but path is empty")
 		}
@@ -168,7 +177,16 @@ func NewSessionForUserMode(username, homeDir string, opencode *auth.OpencodeConf
 		//     opencode 进程（若部署侧 sudoers 对 -E 有 env_keep 限制，见 DEPLOY.md）。
 		command := "cd " + homeDir + " && " + opencode.Path
 		cmd = exec.Command(sudoPath, "-n", "-E", "-u", username, "-i", "bash", "-c", command)
-	} else {
+	case codex != nil && codex.Enabled:
+		if codex.Path == "" {
+			return nil, errors.New("codex enabled but path is empty")
+		}
+		// codex 模式：与 opencode 同形态，`sudo -n -E -u <user> -i bash -c 'cd <homeDir> && <codexPath>'`
+		//   - codex 作为前台子进程运行；codex 退出后 bash -c 立即结束，完全退出会话。
+		//   - -E 保留调用者环境：authEnv 里的 api_key 经 env_key 被 codex 读取。
+		command := "cd " + homeDir + " && " + codex.Path
+		cmd = exec.Command(sudoPath, "-n", "-E", "-u", username, "-i", "bash", "-c", command)
+	default:
 		// sudo -n -u <username> -i bash
 		cmd = exec.Command(sudoPath, "-n", "-u", username, "-i", "bash")
 	}
@@ -191,10 +209,10 @@ func NewSessionForUserMode(username, homeDir string, opencode *auth.OpencodeConf
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
 	}
-	if opencode == nil || !opencode.Enabled {
+	if (opencode == nil || !opencode.Enabled) && (codex == nil || !codex.Enabled) {
 		env = append(env, "PS1=\\u@\\h:\\w\\$ ")
 	}
-	// 注入 opencode 启动前补齐的 api_key 环境变量（sudo -E 透传给目标用户进程）。
+	// 注入代理模式启动前补齐的 api_key 环境变量（sudo -E 透传给目标用户进程）。
 	for k, v := range authEnv {
 		env = append(env, k+"="+v)
 	}
@@ -224,15 +242,15 @@ func NewSessionForUserMode(username, homeDir string, opencode *auth.OpencodeConf
 //
 //	/usr/bin/sudo -n -u root <InitPath> \
 //	    --uid <uid> --gid <gid> --home <homeDir> \
-//	    --session <sessionID> --program <bash|opencode> \
-//	    [--opencode-path <path>] --rootfs <rootfs> \
+//	    --session <sessionID> --program <bash|opencode|codex> \
+//	    [--opencode-path <path>] [--codex-path <path>] --rootfs <rootfs> \
 //	    --network <network> --memory <memory> --cpu <cpu> --pids <pids> \
 //	    --tmp-size <tmp> --nofile <nofile> --core-dump <bool> --max-fsize <fsize> \
 //	    --proc-hidepid <bool> --cgroup-root <cgroupRoot>
 //
 // sessionID 与 cgroup 会话名一致（由调用方 ws.go 生成并传入），保证可追溯。
 // username/homeDir 必须已完成系统存在性校验。
-func newSandboxSession(username, homeDir string, opencode *auth.OpencodeConfig, sandboxCfg *auth.SandboxConfig, sessionID string, sudoPath string, authEnv map[string]string) (*Session, error) {
+func newSandboxSession(username, homeDir string, opencode *auth.OpencodeConfig, codex *auth.CodexConfig, sandboxCfg *auth.SandboxConfig, sessionID string, sudoPath string, authEnv map[string]string) (*Session, error) {
 	if sandboxCfg == nil {
 		return nil, errors.New("sandbox config is nil")
 	}
@@ -264,10 +282,14 @@ func newSandboxSession(username, homeDir string, opencode *auth.OpencodeConfig, 
 		"--home", homeDir,
 		"--session", sessionID,
 	}
-	if opencode != nil && opencode.Enabled {
+	switch {
+	case opencode != nil && opencode.Enabled:
 		program = "opencode"
 		args = append(args, "--program", "opencode", "--opencode-path", opencode.Path)
-	} else {
+	case codex != nil && codex.Enabled:
+		program = "codex"
+		args = append(args, "--program", "codex", "--codex-path", codex.Path)
+	default:
 		args = append(args, "--program", "bash")
 	}
 	args = append(args,
@@ -416,6 +438,83 @@ func SyncOpencodeConfig(username, homeDir string, opencode *auth.OpencodeConfig,
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("sync opencode config failed: %v: %s", err, string(out))
+	}
+	return nil
+}
+
+// syncCodexCommand 构造「同步 codex 共享配置到用户 ~/.codex」的 bash 命令。
+//
+// 采用**白名单同步**（与 opencode 只同步 jsonc+skills 的模式对齐）：只复制
+// config.toml 与 skills/ 两个配置项，绝不同步任何运行态/敏感文件
+// （*.sqlite、*.jsonl、*.db*、日志、会话、installation_id、version.json、
+// shell_snapshots/、thread-writer-locks/、tmp/ 等均不复制）。
+//
+// 命令形态（经 sudo -i 以目标用户身份执行，使复制出的文件归目标用户所有；
+// homeDir/syncFrom 来自系统 user.Lookup 与配置，无注入风险）：
+//
+//		if [ ! -f <dest>/config.toml ]; then
+//		  mkdir -p <dest>
+//		  cp <syncFrom>/config.toml <dest>/config.toml
+//		  if [ -d <syncFrom>/skills ]; then cp -r <syncFrom>/skills <dest>/skills; fi
+//		fi
+//
+//	  - 幂等标记：dest 为 <homeDir>/.codex，~/.codex/config.toml 存在即整体跳过
+//	    （保留用户已有 config.toml 与配置）。
+//	  - 白名单而非黑名单：共享源目录 /share/apps/.codex-config/ 实际混入了大量
+//	    运行态/敏感文件（goals_*.sqlite、logs_*.sqlite、memories_*.sqlite、
+//	    queue_*.sqlite、state_*.sqlite、thread_history_*.sqlite（含 -shm/-wal）、
+//	    history.jsonl、session_index.jsonl、installation_id、.sandbox_migration、
+//	    version.json、sessions/、shell_snapshots/、thread-writer-locks/、.tmp/、
+//	    tmp/ 等），黑名单无法覆盖，因此只同步 config.toml 与 skills/。
+//	  - 源 config.toml 需对目标用户可读（当前为 root 600，目标用户读不了会导致
+//	    cp 失败、同步失败仅 log 不阻塞）。属部署侧问题：部署阶段需 chmod 644，
+//	    代码层面无需处理。
+//	  - overwrite 语义：codex 模式下以 config.toml 存在性标记为主，overwrite=true/false
+//	    命令形态等价（config.toml 不存在时无用户配置可保护），字段仅为与 opencode
+//	    对称保留。
+func syncCodexCommand(username, homeDir, syncFrom string, overwrite bool) string {
+	_ = overwrite // codex 模式下以 config.toml 存在性标记为主，两取值命令形态等价
+	dest := homeDir + "/.codex"
+	return "if [ ! -f " + dest + "/config.toml ]; then\n" +
+		"  mkdir -p " + dest + "\n" +
+		"  cp " + syncFrom + "/config.toml " + dest + "/config.toml\n" +
+		"  if [ -d " + syncFrom + "/skills ]; then cp -r " + syncFrom + "/skills " + dest + "/skills; fi\n" +
+		"fi"
+}
+
+// SyncCodexConfig 以目标用户身份，将共享 codex 配置源同步到用户的 ~/.codex
+// （含 config.toml，注意不是 ~/.config/codex）。
+//
+// 通过 `sudo -n -u <username> -i bash -c '<cmd>'` 执行复制，使文件归目标用户所有。
+// 同步失败返回 error（不阻塞登录，由调用方决定仅 log）。
+//
+// timeout 为整体执行超时（<=0 走默认 15 秒）；username/homeDir 必须已完成系统存在性校验。
+func SyncCodexConfig(username, homeDir string, codex *auth.CodexConfig, timeout time.Duration) error {
+	if codex == nil || !codex.Enabled {
+		return nil
+	}
+	if username == "" || homeDir == "" {
+		return errors.New("empty username or homeDir")
+	}
+	if codex.SyncFrom == "" {
+		return errors.New("codex sync_from is empty")
+	}
+
+	sudoPath, err := exec.LookPath("sudo")
+	if err != nil {
+		return errors.New("cannot find sudo: " + err.Error())
+	}
+
+	cmdStr := syncCodexCommand(username, homeDir, codex.SyncFrom, codex.OverwriteEnabled())
+	cmd := exec.Command(sudoPath, "-n", "-u", username, "-i", "bash", "-c", cmdStr)
+	cmd.Dir = "/"
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sync codex config failed: %v: %s", err, string(out))
 	}
 	return nil
 }

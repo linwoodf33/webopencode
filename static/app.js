@@ -52,6 +52,7 @@
   var modeUserEl = document.getElementById("mode-user");
   var btnBash = document.getElementById("btn-bash");
   var btnOpencode = document.getElementById("btn-opencode");
+  var btnCodex = document.getElementById("btn-codex");
   var welcomeEl = document.getElementById("toolbar-welcome");
 
   var term = null;
@@ -647,7 +648,7 @@
       });
   }
 
-  // 显示模式选择面板（仅当 opencode 启用时调用）。
+  // 显示模式选择面板（仅当 opencode/codex 任一启用时调用）。
   function showModeSelection(token, username) {
     loginPanel.style.display = "none";
     termWrap.style.display = "none";
@@ -676,8 +677,13 @@
         if (result.ok && result.data && result.data.token) {
           currentToken = result.data.token;
           currentUser = result.data.username;
-          // opencode 已启用时展示选择面板，否则直接进入 bash。
-          if (result.data.opencode_enabled) {
+          // opencode / codex 任一启用时展示选择面板（按钮按各自启用状态显隐），
+          // 否则直接进入 bash。
+          var opencodeOn = !!result.data.opencode_enabled;
+          var codexOn = !!result.data.codex_enabled;
+          btnOpencode.style.display = opencodeOn ? "" : "none";
+          btnCodex.style.display = codexOn ? "" : "none";
+          if (opencodeOn || codexOn) {
             showModeSelection(result.data.token, result.data.username);
           } else {
             enterTerminal(result.data.token, result.data.username, "bash");
@@ -701,6 +707,11 @@
   // 模式选择：打开 OpenCode。
   btnOpencode.addEventListener("click", function () {
     enterTerminal(currentToken, currentUser, "opencode");
+  });
+
+  // 模式选择：打开 Codex。
+  btnCodex.addEventListener("click", function () {
+    enterTerminal(currentToken, currentUser, "codex");
   });
 
   // 字号控制：减小 / 增大。

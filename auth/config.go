@@ -55,6 +55,39 @@ func (o *OpencodeConfig) OverwriteEnabled() bool {
 	return *o.Overwrite
 }
 
+// CodexConfig 控制登录后是否直接进入 codex TUI（而非 bash），
+// 以及 codex 二进制与配置同步的来源。字段与 OpencodeConfig 平行。
+type CodexConfig struct {
+	// Enabled 是否启用 codex 模式。false 时退回 bash 模式。
+	Enabled bool `yaml:"enabled"`
+	// Path codex 可执行文件绝对路径。
+	Path string `yaml:"path"`
+	// SyncFrom codex 共享配置源目录（同步到用户 ~/.codex，含 config.toml）。
+	SyncFrom string `yaml:"sync_from"`
+	// Overwrite 同步语义（与 OpencodeConfig 一致，保留字段；但 codex 模式下
+	// 以 ~/.codex/config.toml 存在性标记为主，overwrite 影响甚微）。
+	// 用 *bool 以区分「未设置」（缺省 true）与显式 false。
+	Overwrite *bool `yaml:"overwrite"`
+	// AuthTimeout api_key 补全弹窗的等待超时（秒）。0 或负数走默认 60 秒。
+	AuthTimeout int `yaml:"auth_timeout"`
+	// AuthFile 用户 api_key 存储文件名（位于用户家目录）。空走默认 ".auth.json"。
+	AuthFile string `yaml:"auth_file"`
+}
+
+// DefaultCodexPath 默认 codex 可执行文件路径。
+const DefaultCodexPath = "/share/apps/.codex-standalone/codex"
+
+// DefaultCodexSyncFrom 默认 codex 共享配置源目录。
+const DefaultCodexSyncFrom = "/share/apps/.codex-config"
+
+// OverwriteEnabled 返回 overwrite 是否生效（缺省 true）。
+func (c *CodexConfig) OverwriteEnabled() bool {
+	if c == nil || c.Overwrite == nil {
+		return true
+	}
+	return *c.Overwrite
+}
+
 // SandboxConfig 控制是否启用 Linux 用户命名空间沙箱，以及沙箱的资源配置。
 type SandboxConfig struct {
 	// Enabled 是否启用沙箱。false 时退回现有的「sudo -n -u <user> -i bash」路径。
@@ -202,6 +235,8 @@ type Config struct {
 	TokenTTL int `yaml:"token_ttl"`
 	// Opencode 登录后直接进入 opencode TUI 的配置（enabled=false 退回 bash）。
 	Opencode OpencodeConfig `yaml:"opencode"`
+	// Codex 登录后直接进入 codex TUI 的配置（enabled=false 退回 bash）。
+	Codex CodexConfig `yaml:"codex"`
 	// Sandbox Linux 用户命名空间沙箱配置（enabled=false 退回传统 sudo 模式）。
 	Sandbox SandboxConfig `yaml:"sandbox"`
 	// ADTimeout AD 连接/操作超时（派生，不参与 yaml）。
@@ -254,6 +289,29 @@ opencode:
   enabled: false
   path: "/opt/opencode/bin/opencode"
   sync_from: "/opt/opencode-config"
+  overwrite: true
+
+# codex 模式：登录后是否直接进入 codex TUI（而非 bash）
+# enabled: true 进入 codex；false（缺省）退回 bash
+# path: codex 可执行文件绝对路径（缺省给默认值）
+# sync_from: codex 共享配置源目录，同步到用户 ~/.codex（注意不是 ~/.config/codex），缺省给默认值
+#   白名单同步：只同步 config.toml 与 skills/，绝不同步任何运行态/敏感文件
+#   （*.sqlite/*.jsonl/日志/会话/installation_id/version.json 等）。
+# overwrite: true 全量覆盖；false 仅在目标不存在时复制。
+#   注意：codex 模式下以 ~/.codex/config.toml 存在性标记为主（已存在即整体跳过），
+#   overwrite 影响甚微，字段仅为与 opencode 对齐保留。
+# auth_timeout: 启动前 api_key 补全弹窗的等待超时（秒），0 或缺省走默认 60
+# auth_file: 用户 api_key 存储文件名（位于用户家目录），缺省 ".auth.json"
+#
+# 注意：codex 配置（~/.codex/config.toml）中的 api_key 必须用 env_key 引用环境变量
+# （如 model_providers.<id>.env_key = "YANFENG_API_KEY"），禁止硬编码 key。Web Shell
+# 会读取该引用，若用户 ~/.auth.json 缺失对应 api_key，则在 codex 启动前弹窗让用户补全
+# （复用 opencode 的 auth-request/auth-response 机制）。硬编码 key 将无法触发本机制，
+# 且会随配置同步泄露给所有用户。
+codex:
+  enabled: false
+  path: "/share/apps/.codex-standalone/codex"
+  sync_from: "/share/apps/.codex-config"
   overwrite: true
 
 # Linux 用户命名空间沙箱（setuid-root 的 sandbox-init 作为唯一提权入口）
@@ -349,6 +407,15 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	// Overwrite 缺省 true：未显式设置（nil）时视为 true。显式 false 则保留用户语义。
 	// （*bool 在 LoadConfig 中不做改写，由 OverwriteEnabled() 统一解释。）
+
+	// codex 配置默认值：Path / SyncFrom 缺省给默认路径；Overwrite 缺省 true。
+	if cfg.Codex.Path == "" {
+		cfg.Codex.Path = DefaultCodexPath
+	}
+	if cfg.Codex.SyncFrom == "" {
+		cfg.Codex.SyncFrom = DefaultCodexSyncFrom
+	}
+	// Overwrite 缺省 true，由 OverwriteEnabled() 统一解释（同 opencode）。
 
 	// sandbox 配置默认值。
 	if cfg.Sandbox.InitPath == "" {

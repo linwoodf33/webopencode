@@ -21,6 +21,8 @@ type loginResponse struct {
 	Username string `json:"username"`
 	// OpencodeEnabled 是否启用 opencode 模式，供前端决定是否展示「打开 opencode」选项。
 	OpencodeEnabled bool `json:"opencode_enabled"`
+	// CodexEnabled 是否启用 codex 模式，供前端决定是否展示「打开 Codex」选项。
+	CodexEnabled bool `json:"codex_enabled"`
 }
 
 // errorResponse 错误响应体。
@@ -69,8 +71,8 @@ func loginLogName(raw string) string {
 }
 
 // Login 处理 POST /api/login。
-// opencodeEnabled 表示 opencode 模式是否启用，随登录响应返回给前端。
-func Login(a *auth.Authenticator, opencodeEnabled bool) http.HandlerFunc {
+// opencodeEnabled / codexEnabled 表示对应模式是否启用，随登录响应返回给前端。
+func Login(a *auth.Authenticator, opencodeEnabled, codexEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -101,6 +103,6 @@ func Login(a *auth.Authenticator, opencodeEnabled bool) http.HandlerFunc {
 		}
 
 		log.Printf("login %q ok", username)
-		writeJSON(w, http.StatusOK, loginResponse{Token: token, Username: username, OpencodeEnabled: opencodeEnabled})
+		writeJSON(w, http.StatusOK, loginResponse{Token: token, Username: username, OpencodeEnabled: opencodeEnabled, CodexEnabled: codexEnabled})
 	}
 }

@@ -32,6 +32,10 @@ token_ttl: 300
 # enabled: true 进入 opencode；false（缺省）退回 bash
 # path: opencode 可执行文件绝对路径（缺省给默认值）
 # sync_from: opencode 共享配置源目录（含 skills/ 与 opencode.jsonc），缺省给默认值
+#   源含 AGENTS.md：每次启动会话时检查 ~/.config/opencode/AGENTS.md，缺失且源存在才复制
+#   （独立于整体同步跳过标记、已存在不覆盖、源缺失静默跳过、与 overwrite 无关）
+#   源含 agent/ 目录（策略 A）：源存在且非空、目标 ~/.config/opencode/agent 不存在才整体复制；
+#   目标已有则跳过（保留用户自定义 agent）；源目录为空时不创建目标空目录
 # overwrite: true 全量覆盖目标 opencode.jsonc；false 仅在目标不存在时复制
 # auth_timeout: 启动前 api_key 补全弹窗的等待超时（秒），0 或缺省走默认 60
 # auth_file: 用户 api_key 存储文件名（位于用户家目录），缺省 ".auth.json"
@@ -52,6 +56,10 @@ opencode:
 # sync_from: codex 共享配置源目录，同步到用户 ~/.codex（注意不是 ~/.config/codex），缺省给默认值
 #   白名单同步：只同步 config.toml 与 skills/，绝不同步任何运行态/敏感文件
 #   （*.sqlite/*.jsonl/日志/会话/installation_id/version.json 等）。
+#   源含 AGENTS.md：每次启动会话时检查 ~/.codex/AGENTS.md，缺失且源存在才复制
+#   （独立于整体同步跳过标记、已存在不覆盖、源缺失静默跳过、与 overwrite 无关）。
+#   源含 agents/ 目录（策略 A）：源存在且非空、目标 ~/.codex/agents 不存在才整体复制；
+#   目标已有则跳过（保留用户自定义 agent）；源目录为空时不创建目标空目录
 # overwrite: true 全量覆盖；false 仅在目标不存在时复制。
 #   注意：codex 模式下以 ~/.codex/config.toml 存在性标记为主（已存在即整体跳过），
 #   overwrite 影响甚微，字段仅为与 opencode 对齐保留。

@@ -193,6 +193,10 @@ sandbox:
 EOF
 chown ease:ease /opt/webshell_sandbox1/config.yaml
 chmod 600 /opt/webshell_sandbox1/config.yaml
+# 注意：config.yaml 必须 chown 给服务运行用户（如 ease），否则 systemd（User=ease）启动
+# 即报 permission denied（日志：config error ... open /.../config.yaml: permission denied），
+# 且 Restart=on-failure 会无限重启。手动以 root/当前用户运行 ./webshell --config 能成功属
+# 正常权限差异（读取者不同）。保持 0600 含 AD 密码，仅让服务用户可读。
 ```
 
 ### 2. 配置说明（关键点）
@@ -222,11 +226,11 @@ mount -t nfs easemgt:/data/apps /share/apps
 
 ### 2. opencode 二进制与配置
 - opencode 二进制：`/share/apps/.opencode/bin/opencode`（沙箱内经 bind_mounts 直接读取宿主版本）
-- opencode 共享配置：`/share/apps/.opencode-config`（含 `opencode.jsonc` + `skills/`）
+- opencode 共享配置：`/share/apps/.opencode-config`（含 `opencode.jsonc` + `skills/` + `AGENTS.md` + `agent/`），登录时同步到用户 `~/.config/opencode`；其中 `AGENTS.md` 每次启动缺失才补，`agent/` 目录策略 A（源存在且非空、目标不存在才整体复制）
 
 ### 3. codex 二进制与配置
 - codex 二进制：`/share/apps/.codex-standalone/codex`（非沙箱与沙箱均需可执行，沙箱内经 bind_mounts 直接读取宿主版本）
-- codex 共享配置：`/share/apps/.codex-config`（含 `config.toml` 与 `skills/`），登录时同步到用户 `~/.codex`
+- codex 共享配置：`/share/apps/.codex-config`（含 `config.toml`、`skills/`、`AGENTS.md` 与 `agents/`），登录时同步到用户 `~/.codex`
 
 > 上述 opencode/codex 二进制目录（`/share/apps/.opencode` 与 `/share/apps/.codex-standalone`）通过
 > `bind_mounts` 进入沙箱（方案 B），版本更新见「更新 opencode / codex 版本」。
@@ -236,8 +240,11 @@ mount -t nfs easemgt:/data/apps /share/apps
 - 幂等标记：用户 `~/.codex/config.toml` 已存在即**整体跳过**同步（保留用户已有配置与凭据）。
 - **白名单同步**：只复制 `config.toml` 与 `skills/` 两个配置项，绝不同步任何运行态/敏感文件
   （`*.sqlite`/`*.jsonl`/`*.db*`/日志/会话/`installation_id`/`version.json`/`shell_snapshots/`/`thread-writer-locks/`/`tmp/` 等一律不复制）。源目录即使混入运行态文件也不会误同步给用户。
-- 源 `config.toml` 需对目标用户可读（若为 root 600，`cp` 会失败、同步失败仅 log 不阻塞）；部署侧需 `chmod 644 /share/apps/.codex-config/config.toml`。
+- **AGENTS.md 每次启动单独检查**：独立于整体跳过标记，每次启动检查 `~/.codex/AGENTS.md`，缺失且源 `/share/apps/.codex-config/AGENTS.md` 存在才复制；已存在不覆盖（保留用户编辑）；源缺失静默跳过；与 `overwrite` 无关。opencode（`~/.config/opencode/AGENTS.md`）语义相同。
+- **agents 目录（策略 A）**：源 `/share/apps/.codex-config/agents/` 存在且**非空**、目标 `~/.codex/agents/` 不存在才整体复制；目标已有则跳过（保留用户自定义 agent）；源目录为空时不创建目标空目录；独立于整体跳过标记、与 `overwrite` 无关。opencode 对应 `~/.config/opencode/agent/`（单数），语义相同。
+- 源 `config.toml` 需对目标用户可读（若为 root 600，`cp` 会失败、同步失败仅 log 不阻塞）；部署侧需 `chmod 644 /share/apps/.codex-config/config.toml`。源 `AGENTS.md` 与 `agents/` 目录同理需对服务用户可读（当前 root:root 644）。
 - 同步经 `sudo -n -u <user> -i bash -c '...'` 以目标用户身份执行，复制出的文件归用户所有。
+- **同步命令必须保持单行（用分号 `;` 分隔多条语句）**：`syncCodexCommand` / `syncConfigCommand` 生成的同步命令必须**完全单行**——经 `sudo -i bash -c` 执行时**换行 `\n` 会被吞掉**（`fi\nif` 粘连成 `fiif`），bash 报 `syntax error near unexpected token 'then'`，同步静默失败（仅 log 不阻塞，用户表现为「配置没同步」）。多条语句务必用分号 `;` 分隔，**切勿改回多行/换行写法**（实现/部署约束，改动前请留意）。
 
 **codex 的 api_key 约束（env_key）**：共享 `config.toml` 中的 api_key 必须用
 `model_providers.<id>.env_key = "XXX_API_KEY"` 引用环境变量（如
@@ -365,11 +372,17 @@ sudo -n -u root /opt/webshell_sandbox1/sandbox-init --uid 1000 --gid 1000 \
 - **HTTPS 可用性**：`curl -sS -o /dev/null -w "%{http_code}\n" <base_url>` 应返回非 `000`
   （若返回 `000` / curl 报 `(77)`，说明沙箱缺 CA 证书，确认 `bind_mounts` 已含 `/etc/ssl/certs`）。
 
+**opencode 验证**（若启用 `opencode.enabled: true`）：
+- 首次进入 opencode 后，`ls ~/.config/opencode/AGENTS.md` 应存在且属主为登录用户、内容与 `/share/apps/.opencode-config/AGENTS.md` 一致（每次启动缺失才补）；
+- 源 `/share/apps/.opencode-config/agent/` 非空时，首次进入 opencode 后 `ls ~/.config/opencode/agent/` 应存在（策略 A：源存在且非空、目标不存在才整体复制；目标已有则跳过）。
+
 **codex 验证**（若启用 `codex.enabled: true`）：
 - 登录响应应含 `codex_enabled: true`，前端显示「打开 Codex」按钮；
 - 首次进入 codex 后，`ls ~/.codex/` 应含 `config.toml` 且属主为登录用户（来自 `/share/apps/.codex-config/`）；
+- 首次进入 codex 后，`ls ~/.codex/AGENTS.md` 应存在且属主为登录用户、内容与 `/share/apps/.codex-config/AGENTS.md` 一致（每次启动缺失才补）；
+- 源 `/share/apps/.codex-config/agents/` 非空时，首次进入 codex 后 `ls ~/.codex/agents/` 应存在（策略 A：源存在且非空、目标不存在才整体复制；目标已有则跳过）；
 - 若 `config.toml` 定义了 `env_key` 而用户 `~/.auth.json` 缺失对应 api_key，会弹出补全弹窗，补全后进入 codex TUI（无 ChatGPT 登录界面）；
-- 第二次进入 codex：不重复同步，用户在 `~/.codex/config.toml` 的改动被保留；`~/.codex/` 下无 `auth.json` 覆盖、无任何运行态文件（sqlite/jsonl/日志/会话等）。
+- 第二次进入 codex：不重复同步，用户在 `~/.codex/config.toml` 的改动被保留；**`~/.codex/AGENTS.md` 若已存在则不被覆盖**（删除后再次进入才会重新补全）；`~/.codex/agents/` 若已存在则不被覆盖；`~/.codex/` 下无 `auth.json` 覆盖、无任何运行态文件（sqlite/jsonl/日志/会话等）。
 
 ---
 
@@ -409,6 +422,7 @@ systemctl enable webshell-cgroup.service
 | cgroup 目录累积 | 会话清理失败 | 确认最新 userns-init（cleaner 移到根 cgroup + rmdir）|
 | 沙箱提权风险 | 目录属主错误 | `/opt/webshell_sandbox1` 必须 root:root 0755 |
 | codex 报 "waiting for network" / curl 报 `(77) error setting certificate file` | 沙箱缺 CA 证书 | `bind_mounts` 加入 `/etc/ssl/certs` 并重启服务 |
+| 服务启动即失败，日志 `config error ... permission denied` | config.yaml 属主是 root，服务用户（User=ease）无读权限 | `chown ease:ease config.yaml && chmod 600 config.yaml`（含 AD 密码保持 0600）|
 
 ---
 

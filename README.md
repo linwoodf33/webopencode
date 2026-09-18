@@ -16,8 +16,8 @@
 - **会话模式选择**：登录成功后，若启用了 opencode 或 codex，前端展示「打开 Bash / 打开 OpenCode / 打开 Codex」选择面板；用户选择后才建立终端连接。
 - **opencode 集成**：选择 opencode 后，以登录用户身份在其家目录启动 opencode TUI；退出 opencode 即完全结束会话（不退回 bash）。
 - **codex 集成**：选择 codex 后，以登录用户身份在其家目录启动 codex TUI（经 `sudo -n -E -u <user> -i bash -c 'cd <home> && <codexPath>'`）；退出 codex 即完全结束会话（不退回 bash）。
-- **配置同步**：登录时可将共享的 opencode 配置（`skills/` 与 `opencode.jsonc`）同步到用户 `~/.config/opencode`。用户首次初始化后（已存在 `skills` 目录）即跳过同步，保留其已有配置。
-- **codex 配置同步**：登录时可将共享的 codex 配置（`/share/apps/.codex-config/`，含 `config.toml`）同步到用户 **`~/.codex`**（注意不是 `~/.config/codex`）。用户首次初始化后（已存在 `config.toml`）即跳过同步，保留其已有配置；**白名单同步**：只复制 `config.toml` 与 `skills/`，绝不同步任何运行态/敏感文件（sqlite/jsonl/日志/会话等）。
+- **配置同步**：登录时可将共享的 opencode 配置（`skills/` 与 `opencode.jsonc`）同步到用户 `~/.config/opencode`。用户首次初始化后（已存在 `skills` 目录）即跳过同步，保留其已有配置。此外**每次启动都会单独检查 `~/.config/opencode/AGENTS.md`**：缺失且源 `skills` 同目录的 `AGENTS.md` 存在时才复制（独立于整体同步跳过标记、已存在不覆盖、源缺失静默跳过、与 `overwrite` 无关），保证全局指令始终可用。**agent 目录（策略 A）**：源 `/share/apps/.opencode-config/agent/` 存在且**非空**、目标 `~/.config/opencode/agent/` 不存在时才整体复制；目标已有则跳过（保留用户自定义 agent）；源目录为空时不创建目标空目录；独立于整体跳过标记、与 `overwrite` 无关。**同步命令必须保持单行（用分号 `;` 分隔多条语句）**：`syncConfigCommand`（opencode）生成的同步命令若用换行 `\n` 分隔，经 `sudo -i bash -c` 执行时换行会被丢弃，`fi` 与 `if` 粘连成 `fiif` 报 bash 语法错误、同步静默失败（仅 log 不阻塞，用户表现为「配置没同步」）。
+- **codex 配置同步**：登录时可将共享的 codex 配置（`/share/apps/.codex-config/`，含 `config.toml`）同步到用户 **`~/.codex`**（注意不是 `~/.config/codex`）。用户首次初始化后（已存在 `config.toml`）即跳过同步，保留其已有配置；**白名单同步**：只复制 `config.toml` 与 `skills/`，绝不同步任何运行态/敏感文件（sqlite/jsonl/日志/会话等）。此外**每次启动都会单独检查 `~/.codex/AGENTS.md`**：缺失且源 `AGENTS.md` 存在时才复制（独立于整体跳过标记、已存在不覆盖、源缺失静默跳过、与 `overwrite` 无关）。**agents 目录（策略 A）**：源 `/share/apps/.codex-config/agents/` 存在且**非空**、目标 `~/.codex/agents/` 不存在时才整体复制；目标已有则跳过（保留用户自定义 agent）；源目录为空时不创建目标空目录；独立于整体跳过标记、与 `overwrite` 无关。**同步命令必须保持单行（用分号 `;` 分隔多条语句）**：`syncCodexCommand`（codex）生成的同步命令若用换行 `\n` 分隔，经 `sudo -i bash -c` 执行时换行会被丢弃，`fi` 与 `if` 粘连成 `fiif` 报 bash 语法错误、同步静默失败（仅 log 不阻塞，用户表现为「配置没同步」）。
 - **以目标用户身份运行**：沙箱模式（`sandbox.enabled=true`）下通过 `sudo -n -u root sandbox-init` 启动沙箱，沙箱内进程以**真实用户身份**（含补充组）运行；非沙箱模式（`sandbox.enabled=false`）退回传统 `sudo -n -u <user> -i bash` 切换登录用户，确保文件归属与权限正确。
 - **终端字号调整**：终端工具条提供 `A-`/`A+` 按钮调整字号（8–32px，步进 2px），选择持久化到 `localStorage`，下次登录自动恢复。
 - **终端主题切换**：工具条下拉框内置 8 个流行主题（VS Code Dark、Dracula、Monokai、Nord、Solarized Dark、One Dark、Tokyo Night、GitHub Light），实时切换并持久化，下次登录自动恢复。
@@ -159,7 +159,13 @@ sandbox:
 
 > 配置同步仅在用户首次初始化（`~/.config/opencode/skills` 不存在）时执行；一旦 `skills` 目录已存在，则跳过全部同步（opencode.jsonc 与 skills 均不覆盖），保留用户已有配置。`overwrite` 仅在首次初始化时生效。
 >
-> codex 配置同步同理：仅在用户首次初始化（`~/.codex/config.toml` 不存在）时执行；一旦 `config.toml` 已存在则整体跳过，保留用户已有配置。采用**白名单同步**：只复制 `config.toml` 与 `skills/`，绝不同步任何运行态/敏感文件（源目录即使混入 `*.sqlite`/`*.jsonl`/日志/会话等也不会复制）。`overwrite` 对 codex 影响甚微（以 config.toml 存在性标记为主）。
+> 与整体同步不同，**AGENTS.md 每次启动都会单独检查**：缺失且源 `<sync_from>/AGENTS.md` 存在时才复制到 `~/.config/opencode/AGENTS.md`；独立于整体跳过标记（即使 skills 已存在导致整体同步跳过，AGENTS.md 仍照常检查）；已存在不覆盖（保留用户编辑）；源缺失静默跳过；与 `overwrite` 无关。
+>
+> **agent 目录同理（策略 A）**：源 `<sync_from>/agent/` 存在且**非空**、目标 `~/.config/opencode/agent/` 不存在时才整体复制；目标已有则跳过（保留用户自定义 agent）；源目录为空时不创建目标空目录；独立于整体跳过标记、与 `overwrite` 无关。
+>
+> codex 配置同步同理：仅在用户首次初始化（`~/.codex/config.toml` 不存在）时执行；一旦 `config.toml` 已存在则整体跳过，保留用户已有配置。采用**白名单同步**：只复制 `config.toml` 与 `skills/`，绝不同步任何运行态/敏感文件（源目录即使混入 `*.sqlite`/`*.jsonl`/日志/会话等也不会复制）。`overwrite` 对 codex 影响甚微（以 config.toml 存在性标记为主）。codex 的 **AGENTS.md 同理每次启动单独检查** `~/.codex/AGENTS.md`（缺失且源存在才补、独立于整体跳过、已存在不覆盖、源缺失静默跳过、与 `overwrite` 无关）。codex 的 **agents 目录同理（策略 A）**：源 `<sync_from>/agents/` 存在且**非空**、目标 `~/.codex/agents/` 不存在时才整体复制；目标已有则跳过；源目录为空时不创建目标空目录；独立于整体跳过标记、与 `overwrite` 无关。
+>
+> **同步命令必须保持单行（用分号 `;` 分隔多条语句）**：opencode 的 `syncConfigCommand` 与 codex 的 `syncCodexCommand` 生成的同步命令必须**完全单行**——命令经 `sudo -n -u <user> -i bash -c '<cmd>'` 执行时，**换行 `\n` 会被吞掉**（`fi\nif` 粘连成 `fiif`），bash 报 `syntax error near unexpected token 'then'`，同步静默失败（仅 log 不阻塞，用户表现为「配置没同步」）。多条语句务必用分号 `;` 分隔，**切勿改回多行/换行写法**（实现/部署约束，改动前请留意）。
 
 **sandbox 配置块字段说明**：
 
@@ -310,7 +316,7 @@ ease ALL=(root) NOPASSWD: /opt/webshell_sandbox1/sandbox-init
 | 路径 | 权限要求 | 说明 |
 | ---- | -------- | ---- |
 | 二进制 `/opt/webshell/webshell` | 服务用户可读、可执行 | `chown ease:ease` |
-| 配置 `/opt/webshell/config.yaml` | 服务用户可读（含 AD 密码，建议 `0600`） | `chown ease:ease; chmod 600` |
+| 配置 `/opt/webshell/config.yaml` | 服务用户可读（含 AD 密码，建议 `0600`） | `chown ease:ease; chmod 600`（**属主必须为服务用户**，否则 systemd（`User=ease`）启动即报 `config error ... permission denied` 且 `Restart=on-failure` 无限重启） |
 | 工作目录 `/opt/webshell` | 服务用户可读、可进入 | |
 
 ### 3. opencode / codex 相关资源（供服务用户读取）
@@ -321,6 +327,8 @@ ease ALL=(root) NOPASSWD: /opt/webshell_sandbox1/sandbox-init
 | 配置源目录 `/share/apps/.opencode-config`（含 `skills/` 与 `opencode.jsonc`） | 服务用户可读（`sync_from` 指向） |
 | codex 二进制 `/share/apps/.codex-standalone/codex` | 所有用户可执行（含服务用户） |
 | 配置源目录 `/share/apps/.codex-config`（含 `config.toml`） | 服务用户可读（`sync_from` 指向） |
+
+> 两源目录下的 `AGENTS.md`（源 `<syncFrom>/AGENTS.md`，每次启动缺失才补）同样需对服务用户可读（当前 root:root 644），否则 `cp` 会失败（同步失败仅 log 不阻塞，与现有 config.toml 同类部署约束）。`agent/`（opencode）与 `agents/`（codex）源目录（策略 A 整体复制）同理需对服务用户可读。
 
 > `/share/apps/.opencode` 与 `/share/apps/.codex-standalone` 已通过 `sandbox.bind_mounts` bind 进沙箱（方案 B），沙箱内直接读取宿主版本；更新版本见「opencode / codex 版本更新」。
 
@@ -383,7 +391,7 @@ WebSocket 升级时通过 `?mode=` 查询参数决定会话类型（`handler/ws.
 go test ./...
 ```
 
-当前测试覆盖 `auth` 包（配置加载默认值、必填项校验、YAML 解析、codex env_key 提取）、`pty` 包（syncCodexCommand 命令形态）、`sandbox` 包（validate 对 codex 分支的校验）等。
+当前测试覆盖 `auth` 包（配置加载默认值、必填项校验、YAML 解析、codex env_key 提取）、`pty` 包（syncCodexCommand / syncConfigCommand 命令形态，含 AGENTS.md 与 agent/agents 目录每次启动补全片段断言）、`sandbox` 包（validate 对 codex 分支的校验）等。
 
 ## 安全说明
 

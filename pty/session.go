@@ -387,22 +387,51 @@ func newSandboxSession(username, homeDir string, opencode *auth.OpencodeConfig, 
 	}, nil
 }
 
+// agentsSyncSnippet 返回「补全全局 AGENTS.md」的 shell 片段。
+// 语义：独立于整体同步跳过标记，每次启动都检查；目标缺失且源存在才复制；
+// 已存在不覆盖；源缺失静默跳过；与 overwrite 无关。
+func agentsSyncSnippet(dest, syncFrom string) string {
+	return "if [ ! -f " + dest + "/AGENTS.md ] && [ -f " + syncFrom + "/AGENTS.md ]; then mkdir -p " + dest + " && cp " + syncFrom + "/AGENTS.md " + dest + "/AGENTS.md; fi"
+}
+
+// agentDirSyncSnippet 返回「补全 agent/agents 目录」的 shell 片段。
+// 目录名由 agentDir 传入（opencode 用 "agent"，codex 用 "agents"）。
+// 语义（策略 A）：源目录存在且非空、目标目录不存在才整体复制；目标已有则跳过
+// （保留用户自定义）；源目录为空时不创建目标空目录；独立于整体跳过标记；与 overwrite 无关。
+func agentDirSyncSnippet(dest, syncFrom, agentDir string) string {
+	return "if [ -d " + syncFrom + "/" + agentDir + " ] && [ ! -d " + dest + "/" + agentDir + " ] && [ -n \"$(ls -A " + syncFrom + "/" + agentDir + " 2>/dev/null)\" ]; then mkdir -p " + dest + " && cp -r " + syncFrom + "/" + agentDir + " " + dest + "/" + agentDir + "; fi"
+}
+
 // 通过 sudo -u <username> 执行，使复制出的文件自然归目标用户所有（避开服务用户
 // ease 无 chown 权限的问题）。homeDir/syncFrom/opencodePath 均来自系统 user.Lookup
 // 与配置，无注入风险。
 //
 // 当用户家目录已存在 .config/opencode/skills 目录时，跳过全部同步（opencode.jsonc
 // 与 skills 均不复制，视为已初始化），避免覆盖用户已有配置。
+//
+// 在整体同步 if...fi 之后追加 AGENTS.md 与 agent 目录补全片段
+// （agentsSyncSnippet / agentDirSyncSnippet）：
+//   - AGENTS.md：每次启动都检查 ~/.config/opencode/AGENTS.md，缺失且源存在才从
+//     <syncFrom>/AGENTS.md 复制；已存在不覆盖（保留用户编辑）；源缺失静默跳过。
+//   - agent 目录（策略 A）：源 <syncFrom>/agent 存在且非空、目标
+//     ~/.config/opencode/agent 不存在才整体复制；目标已有则跳过（保留用户自定义 agent）；
+//     源目录为空时不创建目标空目录。
+//     两者均独立于整体跳过标记（即使 skills 已存在导致整体同步跳过，仍照常检查），
+//     且与 overwrite 无关（两分支片段一致）。
+//
+// 注意：返回的命令必须保持**完全单行**（无任何 \n），多个命令之间以分号 ; 分隔。
+// 原因：命令经 `sudo -n -u <user> -i bash -c '<cmd>'` 执行时换行会被吞掉
+// （fi\nif 粘连成 fiif 导致 bash 语法错误），只能用分号分隔保证语法合法。
 func syncConfigCommand(username, homeDir, syncFrom string, overwrite bool) string {
 	dest := homeDir + "/.config/opencode"
 	if overwrite {
 		// 全量覆盖：skills 目录整体复制进 dest，opencode.jsonc 直接覆盖。
 		// 但若用户已有 skills 目录则整体跳过（已初始化）。
-		return "if [ ! -d " + dest + "/skills ]; then mkdir -p " + dest + " && cp -r " + syncFrom + "/skills " + dest + "/ && cp " + syncFrom + "/opencode.jsonc " + dest + "/; fi"
+		return "if [ ! -d " + dest + "/skills ]; then mkdir -p " + dest + " && cp -r " + syncFrom + "/skills " + dest + "/ && cp " + syncFrom + "/opencode.jsonc " + dest + "/; fi; " + agentsSyncSnippet(dest, syncFrom) + "; " + agentDirSyncSnippet(dest, syncFrom, "agent")
 	}
 	// overwrite=false：opencode.jsonc 仅在目标不存在时复制，skills 仍覆盖。
 	// 但若用户已有 skills 目录则整体跳过（已初始化）。
-	return "if [ ! -d " + dest + "/skills ]; then mkdir -p " + dest + " && cp -r " + syncFrom + "/skills " + dest + "/ && ( [ -f " + dest + "/opencode.jsonc ] || cp " + syncFrom + "/opencode.jsonc " + dest + "/ ); fi"
+	return "if [ ! -d " + dest + "/skills ]; then mkdir -p " + dest + " && cp -r " + syncFrom + "/skills " + dest + "/ && ( [ -f " + dest + "/opencode.jsonc ] || cp " + syncFrom + "/opencode.jsonc " + dest + "/ ); fi; " + agentsSyncSnippet(dest, syncFrom) + "; " + agentDirSyncSnippet(dest, syncFrom, "agent")
 }
 
 // SyncOpencodeConfig 以目标用户身份，将共享 opencode 配置源同步到用户的
@@ -452,34 +481,37 @@ func SyncOpencodeConfig(username, homeDir string, opencode *auth.OpencodeConfig,
 // 命令形态（经 sudo -i 以目标用户身份执行，使复制出的文件归目标用户所有；
 // homeDir/syncFrom 来自系统 user.Lookup 与配置，无注入风险）：
 //
-//		if [ ! -f <dest>/config.toml ]; then
-//		  mkdir -p <dest>
-//		  cp <syncFrom>/config.toml <dest>/config.toml
-//		  if [ -d <syncFrom>/skills ]; then cp -r <syncFrom>/skills <dest>/skills; fi
-//		fi
+//	if [ ! -f <dest>/config.toml ]; then mkdir -p <dest> && cp <syncFrom>/config.toml <dest>/config.toml && if [ -d <syncFrom>/skills ]; then cp -r <syncFrom>/skills <dest>/skills; fi; fi; <AGENTS.md snippet>; <agents dir snippet>
 //
-//	  - 幂等标记：dest 为 <homeDir>/.codex，~/.codex/config.toml 存在即整体跳过
-//	    （保留用户已有 config.toml 与配置）。
-//	  - 白名单而非黑名单：共享源目录 /share/apps/.codex-config/ 实际混入了大量
-//	    运行态/敏感文件（goals_*.sqlite、logs_*.sqlite、memories_*.sqlite、
-//	    queue_*.sqlite、state_*.sqlite、thread_history_*.sqlite（含 -shm/-wal）、
-//	    history.jsonl、session_index.jsonl、installation_id、.sandbox_migration、
-//	    version.json、sessions/、shell_snapshots/、thread-writer-locks/、.tmp/、
-//	    tmp/ 等），黑名单无法覆盖，因此只同步 config.toml 与 skills/。
-//	  - 源 config.toml 需对目标用户可读（当前为 root 600，目标用户读不了会导致
-//	    cp 失败、同步失败仅 log 不阻塞）。属部署侧问题：部署阶段需 chmod 644，
-//	    代码层面无需处理。
-//	  - overwrite 语义：codex 模式下以 config.toml 存在性标记为主，overwrite=true/false
-//	    命令形态等价（config.toml 不存在时无用户配置可保护），字段仅为与 opencode
-//	    对称保留。
+// 注意：返回的命令必须保持**完全单行**（无任何 \n），多个命令之间以分号 ; 分隔。
+// 原因：命令经 `sudo -n -u <user> -i bash -c '<cmd>'` 执行时换行会被吞掉
+// （fi\nif 粘连成 fiif 导致 bash 语法错误），只能用分号分隔保证语法合法。
+//   - 幂等标记：dest 为 <homeDir>/.codex，~/.codex/config.toml 存在即整体跳过
+//     （保留用户已有 config.toml 与配置）。
+//   - 白名单而非黑名单：共享源目录 /share/apps/.codex-config/ 实际混入了大量
+//     运行态/敏感文件（goals_*.sqlite、logs_*.sqlite、memories_*.sqlite、
+//     queue_*.sqlite、state_*.sqlite、thread_history_*.sqlite（含 -shm/-wal）、
+//     history.jsonl、session_index.jsonl、installation_id、.sandbox_migration、
+//     version.json、sessions/、shell_snapshots/、thread-writer-locks/、.tmp/、
+//     tmp/ 等），黑名单无法覆盖，因此只同步 config.toml 与 skills/。
+//   - 源 config.toml 需对目标用户可读（当前为 root 600，目标用户读不了会导致
+//     cp 失败、同步失败仅 log 不阻塞）。属部署侧问题：部署阶段需 chmod 644，
+//     代码层面无需处理。
+//   - overwrite 语义：codex 模式下以 config.toml 存在性标记为主，overwrite=true/false
+//     命令形态等价（config.toml 不存在时无用户配置可保护），字段仅为与 opencode
+//     对称保留。
+//   - AGENTS.md 补全：在整体 if...fi 之后追加 agentsSyncSnippet，每次启动都检查
+//     ~/.codex/AGENTS.md，缺失且源存在才从 <syncFrom>/AGENTS.md 复制；已存在不覆盖
+//     （保留用户编辑）；源缺失静默跳过。独立于整体跳过标记（即使 config.toml 已存在
+//     导致整体同步跳过，AGENTS.md 仍照常检查），且与 overwrite 无关。
+//   - agents 目录补全（策略 A）：在整体 if...fi 之后追加 agentDirSyncSnippet
+//     （agentDir 为 "agents"），源 <syncFrom>/agents 存在且非空、目标 ~/.codex/agents
+//     不存在才整体复制；目标已有则跳过（保留用户自定义 agent）；源目录为空时不创建
+//     目标空目录。独立于整体跳过标记，且与 overwrite 无关。
 func syncCodexCommand(username, homeDir, syncFrom string, overwrite bool) string {
 	_ = overwrite // codex 模式下以 config.toml 存在性标记为主，两取值命令形态等价
 	dest := homeDir + "/.codex"
-	return "if [ ! -f " + dest + "/config.toml ]; then\n" +
-		"  mkdir -p " + dest + "\n" +
-		"  cp " + syncFrom + "/config.toml " + dest + "/config.toml\n" +
-		"  if [ -d " + syncFrom + "/skills ]; then cp -r " + syncFrom + "/skills " + dest + "/skills; fi\n" +
-		"fi"
+	return "if [ ! -f " + dest + "/config.toml ]; then mkdir -p " + dest + " && cp " + syncFrom + "/config.toml " + dest + "/config.toml && if [ -d " + syncFrom + "/skills ]; then cp -r " + syncFrom + "/skills " + dest + "/skills; fi; fi; " + agentsSyncSnippet(dest, syncFrom) + "; " + agentDirSyncSnippet(dest, syncFrom, "agents")
 }
 
 // SyncCodexConfig 以目标用户身份，将共享 codex 配置源同步到用户的 ~/.codex

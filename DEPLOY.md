@@ -19,6 +19,15 @@
 | cgroup v2 | 已挂载 | 需 root 预创建 cgroup 根目录并启用控制器 |
 | NFS 客户端 | 已装 | 若需要 bind NFS 挂载点 |
 | AD/LDAPS | 可访问 | 认证依赖 |
+| NSS/sssd | 视环境 | AD 用户经 sssd/winbind 解析时，构建须 `CGO_ENABLED=1`（见下方说明） |
+
+> **⚠️ 必须用 `CGO_ENABLED=1` 构建**：`auth` 通过 Go 的 `os/user` 解析登录用户。
+> 若 AD 用户由 **sssd/winbind** 提供（`/etc/nsswitch.conf` 的 `passwd:` 行为
+> `files systemd sss` 或含 `winbind`），那么**静态链接**（Go 默认 `CGO_ENABLED=0`）
+> 的二进制只解析 `/etc/passwd` 文件，**看不到 AD 用户**，登录会报
+> `user not provisioned on this host`。必须 `CGO_ENABLED=1` 构建，使 `os/user`
+> 经 libc 的 NSS 解析 AD 用户/家目录。构建机需 gcc + libc6-dev；运行时需 glibc
+> （标准系统自带）。
 
 ---
 
@@ -52,12 +61,27 @@ useradd -r -m -s /usr/sbin/nologin ease
 scp -r webshell/ root@<server>:/root/webshell
 ```
 
-### 2. 构建 Go 二进制
+### 2. 构建 Go 二进制（务必 `CGO_ENABLED=1`）
 ```bash
 cd /root/webshell
-go build -o /opt/webshell_sandbox1/webshell .
-go build -o /opt/webshell_sandbox1/sandbox-init ./sandbox
+CGO_ENABLED=1 go build -o /opt/webshell_sandbox1/webshell .
+CGO_ENABLED=1 go build -o /opt/webshell_sandbox1/sandbox-init ./sandbox
 ```
+
+> **为什么必须 `CGO_ENABLED=1`**：AD 用户常由 sssd/winbind 提供，`os/user` 需经
+> libc 的 NSS 才能解析（见「一、环境要求」）。`CGO_ENABLED=1` 产出动态链接 libc
+> 的二进制，运行主机需有 glibc（标准系统自带），构建机需 gcc + libc6-dev。
+> 若漏加，登录会报 `user not provisioned on this host`。
+
+> **离线/内网构建**（目标机无外网时）：使用 Go 模块缓存或内网 goproxy，例如
+> ```bash
+> export GOMODCACHE=/opt/gosrc/pkg/mod
+> export GOPROXY=file:///opt/gosrc/pkg/mod/cache/download   # 或内网 goproxy：https://goproxy.cn
+> export GOSUMDB=off GOFLAGS=-mod=mod
+> # 若有内网 HTTP 代理：export http_proxy=... https_proxy=...
+> ```
+> 缺模块（如 `golang.org/x/sys`）时，可临时挂载/拷贝完整下载缓存到
+> `$GOMODCACHE/cache/download`，或经代理 `go mod download`。
 
 ### 3. 编译 C 辅助程序（userns-init）
 ```bash
@@ -85,11 +109,12 @@ chown ease:ease /opt/webshell_sandbox1/webshell
 ## 四、构建沙箱 rootfs
 
 ### 1. 获取 rootfs 构建脚本
-`build_rootfs.sh` 位于已部署服务器的 `/opt/webshell_sandbox1/scripts/build_rootfs.sh`（不在 Go 源码目录中）。
-从已部署服务器拷贝到新服务器：
+`build_rootfs.sh` 已随仓库提供：`scripts/build_rootfs.sh`。将其放到目标服务器并执行：
 ```bash
 mkdir -p /opt/webshell_sandbox1/scripts
-scp <source-server>:/opt/webshell_sandbox1/scripts/build_rootfs.sh /opt/webshell_sandbox1/scripts/
+scp scripts/build_rootfs.sh root@<server>:/opt/webshell_sandbox1/scripts/
+# 或从已部署服务器拷贝：
+# scp <source-server>:/opt/webshell_sandbox1/scripts/build_rootfs.sh /opt/webshell_sandbox1/scripts/
 ```
 > 该脚本从**目标服务器自身**的 /usr/bin 等拷贝二进制与依赖到 rootfs，因此必须在目标服务器上运行（它构建的是目标服务器的 rootfs）。
 
@@ -98,9 +123,19 @@ scp <source-server>:/opt/webshell_sandbox1/scripts/build_rootfs.sh /opt/webshell
 chmod +x /opt/webshell_sandbox1/scripts/build_rootfs.sh
 /opt/webshell_sandbox1/scripts/build_rootfs.sh
 ```
-- 目标目录：`/opt/runner/rootfs/base`（约 500-600MB）
-- 脚本会从宿主拷贝 bash/coreutils/gcc/python3/make/vim 及其动态依赖
+- 目标目录：`/opt/runner/rootfs/base`
+- 脚本从宿主拷贝 bash/coreutils/gcc/python3/make/vim 等及其动态依赖
 - 构建后自动 chroot 测试 bash 可用
+
+脚本已包含以下关键内容（缺一都可能导致沙箱内功能异常）：
+- **NSS 模块** `libnss_sss.so.2`、`libnss_systemd.so.2`（含依赖）——供沙箱内按名解析
+  AD 用户/组（配合 `sandbox.bind_mounts` 的 `/var/lib/sss/pipes`、`/var/lib/sss/mc`，见「五、配置」）；
+- **用户/组**：拷贝宿主 `/etc/passwd`、`/etc/group`、`/etc/nsswitch.conf`（否则登录用户在
+  沙箱内显示 `I have no name!`、`whoami` 失败）；
+- **locale**：`/usr/lib/locale/locale-archive`（否则沙箱内 `LANG=en_US.utf8` 报 setlocale 警告）；
+- **常用动态库**：`libpthread.so.0`、`libdl.so.2`、`librt.so.1` 等（opencode 等动态二进制需要，
+  否则报 `error while loading shared libraries: libpthread.so.0`）；
+- **安全加固**：构建末尾统一清除所有 `setuid/setgid` 位（防止沙箱内提权）。
 
 ### 3. opencode 二进制：推荐 bind 方式（方案 B）
 当前生产推荐**不把 opencode/codex 拷入 rootfs**，而是通过 `config.yaml` 的 `sandbox.bind_mounts`
@@ -184,12 +219,14 @@ sandbox:
     - "/etc/ssl/certs"                  # 宿主 CA 证书目录（沙箱内 HTTPS 必需）
     - "/share/apps/.opencode"           # opencode 二进制（bind 方式，版本跟随宿主）
     - "/share/apps/.codex-standalone"   # codex 二进制（bind 方式，版本跟随宿主）
+    - "/var/lib/sss/pipes"              # sssd NSS 应答 socket（沙箱内按名解析 AD 用户/组）
+    - "/var/lib/sss/mc"                 # sssd 内存缓存（passwd/group/initgroups）
   bind_hosts: true
   bind_resolv: true
   # userns_init_path: ""          # userns-init 绝对路径；留空自动推导为 sandbox-init 同目录下的 userns-init
-  http_proxy: ""                  # http 代理地址（如 "http://proxy.example.com:8080"）；非空时注入沙箱环境变量 http_proxy/HTTP_PROXY
-  https_proxy: ""                 # https 代理地址（如 "http://proxy.example.com:8080"）；非空时注入沙箱环境变量 https_proxy/HTTPS_PROXY
-  no_proxy: ""                    # 不使用代理的主机列表（如 "localhost,127.0.0.1"）；非空时注入沙箱环境变量 no_proxy/NO_PROXY
+  http_proxy: "http://proxy.example.com:8080"   # http 代理地址；非空时注入沙箱环境变量（小写+大写）
+  https_proxy: "http://proxy.example.com:8080"  # https 代理地址；非空时注入沙箱环境变量（小写+大写）
+  no_proxy: "localhost,127.0.0.1,::1,10.195.86.188,10.195.86.54,cae-chatbot.yanfeng.com"  # 不走代理的主机/域名
 EOF
 chown ease:ease /opt/webshell_sandbox1/config.yaml
 chmod 600 /opt/webshell_sandbox1/config.yaml
@@ -201,6 +238,9 @@ chmod 600 /opt/webshell_sandbox1/config.yaml
 
 ### 2. 配置说明（关键点）
 - `bind_mounts`：宿主机**已挂载**的路径（含 NFS）bind 进沙箱。简单列表形式 `- "/path"`（source=target）。
+- **AD 用户按名解析（sssd）**：若 AD 用户经 sssd 解析，除 `rootfs` 需含 `libnss_sss.so.2`
+  外，还须把宿主 `/var/lib/sss/pipes`（NSS 应答 socket）与 `/var/lib/sss/mc`（内存缓存）
+  加入 `bind_mounts`，否则沙箱内 `whoami`/`ls -l` 等按名解析失败（`id` 仍可显示数字/用户名混合）。
 - `bind_resolv`：将宿主机 `/etc/resolv.conf` 映射进沙箱，解决沙箱内域名无法解析。建议 `network: full` 时开启（沙箱共享宿主网络栈，宿主 DNS stub `127.0.0.53` 可达）。
 - `userns_init_path`：userns-init 可执行文件绝对路径。**留空（缺省）时自动推导为 sandbox-init 同目录下的 `userns-init`**，无需额外配置；仅在需要将 userns-init 放到其他位置时显式指定。
 - `http_proxy` / `https_proxy`：http/https 代理地址（如 `"http://proxy.example.com:8080"`），非空时注入沙箱进程环境变量（同时设置小写与大写两种形式，如 `http_proxy` / `HTTP_PROXY`）。仅 `network: full` 时沙箱有外部网络，代理才能生效。
@@ -278,6 +318,16 @@ chmod 755 /share/apps/.codex-standalone/codex
 > **安全提示**：bind 后沙箱内（登录用户身份）对 `/share/apps/.opencode` 与
 > `/share/apps/.codex-standalone` **可写**（未做只读 remount）。实际 codex/opencode 以只读方式执行，
 > 被篡改风险低；rootfs 中的旧副本保留作为 fallback 无害。
+
+### 5. AD 名称解析（sssd，沙箱内）
+
+若 AD 用户经 **sssd** 提供（`/etc/nsswitch.conf` 的 `passwd:` 行为 `files systemd sss`）：
+- 构建二进制必须 `CGO_ENABLED=1`（见「一、环境要求」/「三、构建」）；
+- `rootfs` 需含 `libnss_sss.so.2`（最新 `build_rootfs.sh` 已包含）；
+- `config.yaml` 的 `sandbox.bind_mounts` 需加入 `/var/lib/sss/pipes` 与 `/var/lib/sss/mc`。
+
+完成后，沙箱内 `id` / `whoami` / `ls -l` 可按名解析 AD 用户与组。`getent` 未装入 rootfs
+时可忽略（不影响 `id`/`whoami`）。
 
 ---
 
@@ -423,6 +473,10 @@ systemctl enable webshell-cgroup.service
 | 沙箱提权风险 | 目录属主错误 | `/opt/webshell_sandbox1` 必须 root:root 0755 |
 | codex 报 "waiting for network" / curl 报 `(77) error setting certificate file` | 沙箱缺 CA 证书 | `bind_mounts` 加入 `/etc/ssl/certs` 并重启服务 |
 | 服务启动即失败，日志 `config error ... permission denied` | config.yaml 属主是 root，服务用户（User=ease）无读权限 | `chown ease:ease config.yaml && chmod 600 config.yaml`（含 AD 密码保持 0600）|
+| 登录报 `user not provisioned on this host`（但宿主 `getent passwd <user>` 正常） | 二进制为静态链接（`CGO_ENABLED=0`），无法解析 sssd/winbind 用户 | 用 `CGO_ENABLED=1` 重新构建 `webshell`/`sandbox-init`（见「三、构建」）|
+| 沙箱启动报 `build rootfs: bind ...: too many levels of symbolic links` | autofs 子路径（NFS 挂载点）空闲卸载；新 mount namespace 内首次访问触发 autofs 报 ELOOP | 升级到含 `warmHostPaths`（unshare 前于宿主 ns 预热所有 bind 源）的 `sandbox-init` |
+| 沙箱内 `whoami` 报 `cannot find name for user ID`、`ls -l` 显示数字 UID | rootfs 缺 `libnss_sss.so.2`，或未 bind `/var/lib/sss/pipes` / `/var/lib/sss/mc` | 见「六、5 AD 名称解析」；用最新 `build_rootfs.sh` 重建 |
+| 沙箱内 opencode 报 `libpthread.so.0: cannot open shared object file` | rootfs 缺 opencode 动态库 | 用最新 `build_rootfs.sh`（已含 `libpthread/libdl/librt`）重建 rootfs |
 
 ---
 

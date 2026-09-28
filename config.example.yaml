@@ -111,6 +111,12 @@ sandbox:
   bind_mounts:
     - "/easeshare/SH/Method2"
     - "/easeshare/SIMU3/Sys_Run"
+    # 沙箱内 opencode/codex 联网必需的宿主 CA 证书目录
+    - "/etc/ssl/certs"
+    # AD 用户按名解析（sssd）：rootfs 需含 libnss_sss.so.2；并 bind 以下两项，
+    # 否则沙箱内 whoami / ls -l 无法解析 AD 用户名（详见 DEPLOY.md「AD 名称解析」）
+    - "/var/lib/sss/pipes"
+    - "/var/lib/sss/mc"
   # 映射宿主机 /etc/hosts 到沙箱（解决沙箱内主机名解析）
   bind_hosts: true
   # 映射宿主机 /etc/resolv.conf 到沙箱（解决沙箱内域名解析；建议 network: full 时开启，

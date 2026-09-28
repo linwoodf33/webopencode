@@ -59,6 +59,8 @@
 │   ├── index.html           # 登录面板、模式选择面板、终端工具条与终端容器
 │   ├── app.js               # 前端逻辑（登录、WS、xterm、字号/主题、会话恢复）
 │   └── css/style.css        # 样式
+├── scripts/                 # 部署脚本
+│   └── build_rootfs.sh      # 构建沙箱 rootfs（须在目标服务器上运行）
 └── opencode/                # opencode 相关资源（共享配置源可参考）
     ├── skills/              # 共享 skills
     ├── opencode.jsonc       # opencode 配置
@@ -69,11 +71,17 @@
 
 需要 Go 1.26.5 或更高版本，以及 gcc（用于编译 C 辅助程序 `userns_init.c`）。
 
+> **⚠️ 必须用 `CGO_ENABLED=1` 构建 `webshell` 与 `sandbox-init`**：若 AD 用户经
+> sssd/winbind 解析（`/etc/nsswitch.conf` 的 `passwd:` 含 `sss`），静态链接（Go 默认
+> `CGO_ENABLED=0`）的二进制只读 `/etc/passwd`，**无法解析 AD 用户**，登录会报
+> `user not provisioned on this host`。`CGO_ENABLED=1` 使 `os/user` 经 libc NSS 解析；
+> 因此运行时需 glibc（标准系统自带），构建机需 gcc + libc6-dev。
+
 ```bash
-# 主程序
-go build -o /opt/webshell_sandbox1/webshell .
+# 主程序（沙箱模式必需 CGO_ENABLED=1）
+CGO_ENABLED=1 go build -o /opt/webshell_sandbox1/webshell .
 # 沙箱启动器（Go）
-go build -o /opt/webshell_sandbox1/sandbox-init ./sandbox
+CGO_ENABLED=1 go build -o /opt/webshell_sandbox1/sandbox-init ./sandbox
 # C 辅助（单线程 unshare/ns 创建）
 gcc -O2 -static -o /opt/webshell_sandbox1/userns-init sandbox/userns_init.c
 # rootfs 构建（见 DEPLOY.md / scripts/build_rootfs.sh）
@@ -149,6 +157,8 @@ sandbox:
     # 也可 bind 系统/共享目录：如 /etc/ssl/certs（宿主 CA 证书，沙箱内 HTTPS 必需）、
     # /share/apps/.opencode 与 /share/apps/.codex-standalone（opencode/codex 二进制版本跟随宿主）
     - "/etc/ssl/certs"            # 宿主 CA 证书目录（沙箱内 opencode/codex 联网必需）
+    - "/var/lib/sss/pipes"        # sssd NSS 应答 socket（沙箱内按名解析 AD 用户/组）
+    - "/var/lib/sss/mc"           # sssd 内存缓存（passwd/group/initgroups）
   bind_hosts: true                # 映射宿主机 /etc/hosts 到沙箱（解决沙箱内主机名解析）
   bind_resolv: true               # 映射宿主机 /etc/resolv.conf 到沙箱（解决沙箱内域名解析）
   # userns_init_path: ""          # userns-init 绝对路径；留空自动推导为 sandbox-init 同目录下的 userns-init

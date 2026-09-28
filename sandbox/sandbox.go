@@ -133,9 +133,44 @@ func Run(cfg *Config) error {
 	// 否则 NFS 等依赖组权限的 ACL 检查会因丢失补充组而 Permission denied。
 	cfg.Groups = resolveSupplementaryGroups(cfg)
 
+	// 预热宿主 autofs/NFS 路径：/share、/easeshare 等常为 autofs，其子路径（NFS
+	// 挂载点）空闲后会被自动卸载。sandbox 随后会创建新的 mount namespace，若某
+	// bind 源在 unshare 时尚未挂载，克隆进新 namespace 的 autofs 在沙箱内首次访问
+	// 会返回 ELOOP（"too many levels of symbolic links"），导致 buildRootFS 绑定
+	// 失败、会话无法启动。此处仍在宿主 mount namespace（且为 root）内 stat 各路径，
+	// 触发 autofs 完成挂载，使其被正确克隆进新 namespace。失败忽略（真实错误交由
+	// 后续 bind 明确报出）。
+	warmHostPaths(cfg)
+
 	// 以宿主 root 身份 exec 单线程 C 程序（userns-init，不降权），由它完成
 	// unshare NS/PID/[NET]、make-rprivate、fork 并 exec 回本二进制（--child）。
 	return execUsernsInit(cfg)
+}
+
+// warmHostPaths 在进入新 mount namespace 之前、以宿主 root 身份 stat 家目录、
+// rootfs 及所有 bind 源，触发 autofs/NFS 完成挂载。
+//
+// 背景：autofs 子路径空闲后自动卸载；在新 mount namespace 内首次访问未挂载的
+// autofs 子路径会 ELOOP。提前在宿主命名空间触发挂载可使其被克隆进新 namespace，
+// 从而保证 buildRootFS 中的 bind 操作成功。所有错误忽略（非 autofs 的普通路径
+// 本就存在，stat 无副作用；不存在的路径由后续流程正常报错）。
+func warmHostPaths(cfg *Config) {
+	paths := []string{
+		cfg.Rootfs,
+		cfg.Home,
+		cfg.OpencodePath,
+		cfg.CodexPath,
+		cfg.AuthEnvFile,
+	}
+	for _, m := range cfg.BindMounts {
+		paths = append(paths, m.Source)
+	}
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		_, _ = os.Stat(p)
+	}
 }
 
 // isChild 判断当前进程是否由 re-exec 以 --child 标记启动。

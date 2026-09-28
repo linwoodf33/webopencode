@@ -109,19 +109,30 @@ chown ease:ease /opt/webshell_sandbox1/webshell
 ## 四、构建沙箱 rootfs
 
 ### 1. 获取 rootfs 构建脚本
-`build_rootfs.sh` 已随仓库提供：`scripts/build_rootfs.sh`。将其放到目标服务器并执行：
+
+仓库按操作系统提供两个脚本（逻辑相同，仅库目录 / 二进制名 / locale / NSS 路径按发行版适配）：
+
+| 发行版 | 脚本 |
+|---|---|
+| Ubuntu 22.04（类 Debian，multiarch） | `scripts/build_rootfs_ubuntu.sh` |
+| RHEL 9.x / Rocky / AlmaLinux / CentOS Stream 9 | `scripts/build_rootfs_rhel.sh` |
+
 ```bash
 mkdir -p /opt/webshell_sandbox1/scripts
-scp scripts/build_rootfs.sh root@<server>:/opt/webshell_sandbox1/scripts/
-# 或从已部署服务器拷贝：
-# scp <source-server>:/opt/webshell_sandbox1/scripts/build_rootfs.sh /opt/webshell_sandbox1/scripts/
+# 按目标机系统选择其一：
+scp scripts/build_rootfs_ubuntu.sh root@<server>:/opt/webshell_sandbox1/scripts/
+# scp scripts/build_rootfs_rhel.sh   root@<server>:/opt/webshell_sandbox1/scripts/
 ```
-> 该脚本从**目标服务器自身**的 /usr/bin 等拷贝二进制与依赖到 rootfs，因此必须在目标服务器上运行（它构建的是目标服务器的 rootfs）。
+> 脚本从**目标服务器自身**的 `/usr/bin`、`/usr/lib*` 拷贝二进制与依赖到 rootfs，因此必须在目标服务器上运行（它构建的是目标服务器的 rootfs）。
 
 ### 2. 运行构建脚本（需 root）
 ```bash
-chmod +x /opt/webshell_sandbox1/scripts/build_rootfs.sh
-/opt/webshell_sandbox1/scripts/build_rootfs.sh
+# Ubuntu 22.04：
+chmod +x /opt/webshell_sandbox1/scripts/build_rootfs_ubuntu.sh
+/opt/webshell_sandbox1/scripts/build_rootfs_ubuntu.sh
+# RHEL 9.x：
+# chmod +x /opt/webshell_sandbox1/scripts/build_rootfs_rhel.sh
+# /opt/webshell_sandbox1/scripts/build_rootfs_rhel.sh
 ```
 - 目标目录：`/opt/runner/rootfs/base`
 - 脚本从宿主拷贝 bash/coreutils/gcc/python3/make/vim 等及其动态依赖
@@ -323,7 +334,7 @@ chmod 755 /share/apps/.codex-standalone/codex
 
 若 AD 用户经 **sssd** 提供（`/etc/nsswitch.conf` 的 `passwd:` 行为 `files systemd sss`）：
 - 构建二进制必须 `CGO_ENABLED=1`（见「一、环境要求」/「三、构建」）；
-- `rootfs` 需含 `libnss_sss.so.2`（最新 `build_rootfs.sh` 已包含）；
+- `rootfs` 需含 `libnss_sss.so.2`（`build_rootfs_ubuntu.sh` / `build_rootfs_rhel.sh` 均已包含）；
 - `config.yaml` 的 `sandbox.bind_mounts` 需加入 `/var/lib/sss/pipes` 与 `/var/lib/sss/mc`。
 
 完成后，沙箱内 `id` / `whoami` / `ls -l` 可按名解析 AD 用户与组。`getent` 未装入 rootfs
@@ -475,8 +486,8 @@ systemctl enable webshell-cgroup.service
 | 服务启动即失败，日志 `config error ... permission denied` | config.yaml 属主是 root，服务用户（User=ease）无读权限 | `chown ease:ease config.yaml && chmod 600 config.yaml`（含 AD 密码保持 0600）|
 | 登录报 `user not provisioned on this host`（但宿主 `getent passwd <user>` 正常） | 二进制为静态链接（`CGO_ENABLED=0`），无法解析 sssd/winbind 用户 | 用 `CGO_ENABLED=1` 重新构建 `webshell`/`sandbox-init`（见「三、构建」）|
 | 沙箱启动报 `build rootfs: bind ...: too many levels of symbolic links` | autofs 子路径（NFS 挂载点）空闲卸载；新 mount namespace 内首次访问触发 autofs 报 ELOOP | 升级到含 `warmHostPaths`（unshare 前于宿主 ns 预热所有 bind 源）的 `sandbox-init` |
-| 沙箱内 `whoami` 报 `cannot find name for user ID`、`ls -l` 显示数字 UID | rootfs 缺 `libnss_sss.so.2`，或未 bind `/var/lib/sss/pipes` / `/var/lib/sss/mc` | 见「六、5 AD 名称解析」；用最新 `build_rootfs.sh` 重建 |
-| 沙箱内 opencode 报 `libpthread.so.0: cannot open shared object file` | rootfs 缺 opencode 动态库 | 用最新 `build_rootfs.sh`（已含 `libpthread/libdl/librt`）重建 rootfs |
+| 沙箱内 `whoami` 报 `cannot find name for user ID`、`ls -l` 显示数字 UID | rootfs 缺 `libnss_sss.so.2`，或未 bind `/var/lib/sss/pipes` / `/var/lib/sss/mc` | 见「六、5 AD 名称解析」；用对应系统的 `build_rootfs_*.sh` 重建 |
+| 沙箱内 opencode 报 `libpthread.so.0: cannot open shared object file` | rootfs 缺 opencode 动态库 | 用对应系统的 `build_rootfs_*.sh`（已含 `libpthread/libdl/librt`）重建 rootfs |
 
 ---
 
@@ -537,34 +548,35 @@ chmod 0755 /opt/webshell_sandbox1/sandbox-init /opt/webshell_sandbox1/userns-ini
 chown ease:ease /opt/webshell_sandbox1/webshell
 ```
 
-### 12.5 rootfs 构建（RHEL 特有）
+### 12.5 rootfs 构建（RHEL 专用脚本）
 
-**关键差异**：`build_rootfs.sh` 依赖宿主的库目录结构。RHEL 的动态库在 `/usr/lib64`（而非
-Ubuntu 的 `/usr/lib/x86_64-linux-gnu`），且 `ldd` 输出路径、`ld-linux-x86-64.so.2` 位置不同。
-直接跑 Ubuntu 版脚本可能在 chroot 测试时失败（bash "No such file or directory"）。
+RHEL 与 Ubuntu 的差异集中在库目录与二进制名：RHEL 动态库在 **`/usr/lib64`**（无 multiarch
+`/usr/lib/x86_64-linux-gnu`）、Python 为 **3.9**、`vim`/`vi` 为真实二进制（无 `vim.basic` 与
+alternatives）、NSS 模块在 `/usr/lib64`、locale 为**目录式**（`/usr/lib/locale/<lang>`，通常无
+`locale-archive`）。因此**不要**在 RHEL 上用 Ubuntu 版脚本（会在 chroot 测试报
+`/bin/bash: No such file or directory`）。
 
-**在 RHEL 上调整脚本要点**（修改 `build_rootfs.sh`）：
-1. 目录结构新增 `/usr/lib64`：
-   ```bash
-   mkdir -p "$ROOT"/{usr/lib64,lib64}
-   ```
-2. 依赖库路径：RHEL 的库位于 `/usr/lib64/`，`copy_dep` 的目标路径保持宿主绝对路径
-   （`${lib#/}`），符号链接可正确解析——脚本无需大改，只要**能正确处理 `/usr/lib64`**。
-3. 强制链接器：RHEL 的 `ld-linux-x86-64.so.2` 位于 `/usr/lib64/ld-linux-x86-64.so.2`，
-   脚本末尾的链接器拷贝段需把 `/usr/lib64` 纳入搜索：
-   ```bash
-   for cand in /lib64/ld-linux-x86-64.so.2 /usr/lib64/ld-linux-x86-64.so.2; do
-     [ -e "$cand" ] && [ ! -e "$ROOT${cand#/}" ] && { mkdir -p "$(dirname "$ROOT${cand#/}")"; cp -a "$cand" "$ROOT${cand#/}"; }
-   done
-   ```
-4. `/etc/passwd`、`/etc/group`、locale-archive 等基础文件照常写入；RHEL 的 locale-archive
-   位于 `/usr/lib/locale/locale-archive`（与 Ubuntu 相同路径），拷贝即可支持中文：
-   ```bash
-   mkdir -p "$ROOT/usr/lib/locale"
-   cp -a /usr/lib/locale/locale-archive "$ROOT/usr/lib/locale/" 2>/dev/null
-   ```
-5. 运行后必须通过 chroot 测试：`chroot "$ROOT" /bin/bash -c 'echo OK; id; ls /'`，
-   若报 `No such file or directory`，说明链接器/库未拷全，按上文定位修复。
+直接使用为 RHEL 适配的脚本：
+
+```bash
+scp scripts/build_rootfs_rhel.sh root@<rhel-server>:/opt/webshell_sandbox1/scripts/
+chmod +x /opt/webshell_sandbox1/scripts/build_rootfs_rhel.sh
+/opt/webshell_sandbox1/scripts/build_rootfs_rhel.sh
+```
+
+脚本已在 RHEL 9.x 上适配：`/usr/lib64` 库路径、`ld-linux-x86-64.so.2`（`/lib64`）、
+`python3.9`、`vim`/`vi` 真实文件及其依赖（`libselinux/libacl/libattr/libgpm/libpcre2`）、
+目录式 locale、`libnss_sss.so.2`/`libnss_systemd.so.2`（`/usr/lib64`）、宿主
+`/etc/passwd`、`/etc/group`、`/etc/nsswitch.conf`，并统一清除 setuid/setgid。
+
+运行后必须通过 chroot 测试：`chroot "$ROOT" /bin/bash -c 'echo OK; id; ls /'`；
+若报 `No such file or directory`，说明链接器/库未拷全，检查 `/usr/lib64` 与
+`/lib64/ld-linux-x86-64.so.2`。
+
+> **AD 名称解析（RHEL）**：`nsswitch.conf` 通常为 `passwd: sss files systemd`（sss 优先）。
+> 需保证宿主 **sssd 服务为 active**（`systemctl enable --now sssd`），并把
+> `/var/lib/sss/pipes`、`/var/lib/sss/mc` 加入 `sandbox.bind_mounts`；否则沙箱内无法
+> 按名解析 AD 用户。
 
 ### 12.6 SELinux 处理（RHEL 部署方式：**关闭 SELinux**）
 

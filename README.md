@@ -59,8 +59,9 @@
 │   ├── index.html           # 登录面板、模式选择面板、终端工具条与终端容器
 │   ├── app.js               # 前端逻辑（登录、WS、xterm、字号/主题、会话恢复）
 │   └── css/style.css        # 样式
-├── scripts/                 # 部署脚本
-│   └── build_rootfs.sh      # 构建沙箱 rootfs（须在目标服务器上运行）
+├── scripts/                 # 部署脚本（按发行版选择）
+│   ├── build_rootfs_ubuntu.sh   # 构建沙箱 rootfs（Ubuntu 22.04）
+│   └── build_rootfs_rhel.sh     # 构建沙箱 rootfs（RHEL 9.x）
 └── opencode/                # opencode 相关资源（共享配置源可参考）
     ├── skills/              # 共享 skills
     ├── opencode.jsonc       # opencode 配置
@@ -84,7 +85,7 @@ CGO_ENABLED=1 go build -o /opt/webshell_sandbox1/webshell .
 CGO_ENABLED=1 go build -o /opt/webshell_sandbox1/sandbox-init ./sandbox
 # C 辅助（单线程 unshare/ns 创建）
 gcc -O2 -static -o /opt/webshell_sandbox1/userns-init sandbox/userns_init.c
-# rootfs 构建（见 DEPLOY.md / scripts/build_rootfs.sh）
+# rootfs 构建（见 DEPLOY.md；按系统选 scripts/build_rootfs_ubuntu.sh 或 build_rootfs_rhel.sh）
 ```
 
 > 部署目录可自定义（本文档以 `/opt/webshell_sandbox1` 为例）：若更换部署目录，需同步修改 `config.yaml` 的 `init_path`、sudoers 精确路径规则、systemd 单元，并注意 `userns_init_path` 留空时自动推导为 sandbox-init 同目录（见「配置说明」）。
@@ -260,7 +261,7 @@ systemctl status webshell   # 查看状态
 启用 Linux 沙箱隔离时，除常规部署外还需：构建 3 个二进制（webshell / sandbox-init / userns-init）、构建 rootfs、配置 `config.yaml` 的 `sandbox` 块、配置 sudoers + cgroup + systemd 单元，最后启动验证。**详细部署见 DEPLOY.md，含 Ubuntu 与 RHEL（关闭 SELinux）**，此处仅列概要：
 
 1. **构建 3 个二进制**：`go build` 主程序与 `sandbox-init`，`gcc -O2 -static` 编译 `userns-init`（见「编译构建」）。
-2. **构建 rootfs**：在目标服务器上运行 `/opt/webshell_sandbox1/scripts/build_rootfs.sh`（需 root），构建到 `/opt/runner/rootfs/base`（约 500–600MB）。
+2. **构建 rootfs**：在目标服务器上运行对应系统的脚本（Ubuntu 用 `scripts/build_rootfs_ubuntu.sh`，RHEL 9.x 用 `scripts/build_rootfs_rhel.sh`，需 root），构建到 `/opt/runner/rootfs/base`。
 3. **配置 config.yaml**：启用 `sandbox.enabled: true`，设置 `init_path`、`rootfs_path`、`network`、`bind_mounts`、`bind_hosts` 等（见「配置说明」）。
 4. **sudoers + cgroup + systemd**：添加沙箱 sudoers 规则；预创建 `/sys/fs/cgroup/webshell_sandbox` 并启用 cpu/memory/pids 控制器；配置 `webshell-sandbox.service`（端口可配，示例 8090）。
 5. **启动验证**：启动 systemd 服务，浏览器 AD 登录后，沙箱内 `id` 应显示真实用户名（uid/gid/补充组与宿主机一致），vim、opencode、NFS bind 路径可用。

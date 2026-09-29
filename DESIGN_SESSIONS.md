@@ -187,6 +187,35 @@ type SessionIndex interface {
 
 **短期过期判定**：未 attached 且超过 `expireAt` 才过期，以索引中的 `Attached` 状态为准。`expired()` 语义：长期 `now >= expireAt`（无论是否 attached）；短期 `!Attached && now >= expireAt`。
 
+### 5.4 re-attach 强制重绘（ForceResizeCurrent）
+
+**目的**：re-attach（重新 attach 一个已 detach 的空闲会话）时，前端是全新的 xterm，
+不持有历史回放缓冲，若后台应用不主动重绘则显示空白。需让前台应用（bash/readline、
+opencode/codex TUI）主动重绘一次。
+
+**机制**：`Attach(forceResize=true)` → 锁外调用 `pty.ForceResizeCurrent()` → 对 pty
+master 做「落定非零基准 → 差一 → 还原」的 `TIOCSWINSZ` 序列 → 内核向前台 pgrp
+投递 `SIGWINCH` → 应用重绘 → pump → 前端 output。
+
+**三条经验（关键，勿删）**：
+
+1. **SIGWINCH 合并**：SIGWINCH 是标准信号，会被内核合并。两次尺寸变更紧邻发出时，
+   bash 的处理器只运行一次、读到最终尺寸，与其缓存一致 → 判定「尺寸无变化」→ 不重绘。
+   故需以 `forceResizeStepDelay`（默认 80ms）间隔，让中间尺寸先被 bash 消费（缓存更新
+   并重绘），还原时再触发一次，才能稳定产生 output。
+2. **(0,0) 首次变更不投递**：本环境（沙箱 userns/pidns/独立 devpts）下，slave winsize
+   从 (0,0)→非零的**首次**变更不产生 SIGWINCH（ioctl rc=0，尺寸「存住」但无信号）。
+   故必须先把非零基准落定，再做非零→非零抖动，否则 re-attach 仍空白。
+3. **代价与残余风险**：持 `pty.Session.mu` 期间 sleep ≤160ms（2×80ms），阻塞同会话的
+   Write/Resize/Read/Close；仅 re-attach 触发（此时 readLoop 尚未启动，竞争面窄、无
+   死锁）。极端负载下 80ms 可能不足（偶发仍空白，用户按回车可兜底）。
+
+**曾评估的替代方案**：`TIOCSIG`（5.15 内核未实现）；`TIOCGPGRP` + `kill`（服务以 ease
+运行，跨用户 kill 前台 pgrp 的权限不确定）——均未采用。
+
+`forceResizeStepDelay` 声明为包内变量（默认 `80 * time.Millisecond`），便于环境/负载
+变化时无需改码调整，不导出。
+
 ---
 
 ## 6. 交互会话持久化（跨 webshell 重启）

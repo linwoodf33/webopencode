@@ -1,13 +1,72 @@
 package handler
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"webshell/pty"
 )
+
+// newWSServerConn 建立一个真实 WebSocket 连接，并返回服务端一侧的 *websocket.Conn
+// （供 SessionManager.Attach 写入）。对端连接与服务由 t.Cleanup 自动关闭。
+func newWSServerConn(t *testing.T) *websocket.Conn {
+	t.Helper()
+	connCh := make(chan *websocket.Conn, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		connCh <- c
+		// 阻塞读取直到连接关闭，防止 handler 提前返回导致连接被回收。
+		for {
+			if _, _, err := c.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	client, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatalf("dial ws: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	select {
+	case c := <-connCh:
+		return c
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ws server conn")
+		return nil
+	}
+}
+
+// TestAttachForceResizeNilProc 校验 forceResize=true 且 proc 为 nil 时 Attach
+// 不 panic（nil-proc 守卫生效），并正常附着返回 true。
+func TestAttachForceResizeNilProc(t *testing.T) {
+	clk := &testClock{t: time.Unix(1_700_000_000, 0)}
+	mgr, ix := newTestManager(clk)
+	// addLocalSession 不设置 proc，故 proc == nil。
+	ls := addLocalSession(mgr, "s1", "alice", "bash", false, clk.now().Add(time.Hour), false)
+
+	ac := &attachedConn{conn: newWSServerConn(t)}
+	if !mgr.Attach(ls, ac, true) {
+		t.Fatal("Attach(forceResize=true, proc=nil) should succeed")
+	}
+	if info, ok := ix.Get("s1"); !ok || !info.Attached {
+		t.Errorf("session should be marked attached, got %+v ok=%v", info, ok)
+	}
+	mgr.Detach(ls, ac)
+}
 
 // mustPty 在测试中创建一个真实 pty（bash）。不可用时跳过。
 func mustPty(t *testing.T) *pty.Session {

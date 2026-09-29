@@ -1,9 +1,12 @@
 package pty
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/creack/pty"
 
 	"webshell/auth"
 )
@@ -207,6 +210,138 @@ func TestSyncCodexConfigEmptyArgs(t *testing.T) {
 	if err := SyncCodexConfig("testuser", "/home/testuser", disabled, 0); err != nil {
 		t.Errorf("SyncCodexConfig(disabled) = %v, want nil", err)
 	}
+}
+
+// TestForceResizeCurrent 用注入的 get/set 接缝覆盖 ForceResizeCurrent 的各分支。
+//
+// 关键不变量（修复规格）：序列末尾两次 setsize 必须是**非零→非零且尺寸不同**
+// 的变更，才能在本沙箱（userns+pidns）下真正投递 SIGWINCH。0×0 场景必须被
+// 归一为非零基准后再做两次非零→非零抖动，而非只设一次默认尺寸。
+//
+// 注意注入的 ptyGetsize 返回顺序为 (rows, cols, err)，与 creack/pty 一致。
+func TestForceResizeCurrent(t *testing.T) {
+	// 保存并在用例结束后恢复全局接缝，避免跨测试污染。
+	origGet, origSet := ptyGetsize, ptySetsize
+	t.Cleanup(func() { ptyGetsize, ptySetsize = origGet, origSet })
+
+	// master 仅需非 nil（get/set 已被替换，不会真正触达 fd）。
+	newSess := func() *Session { return &Session{master: &os.File{}} }
+
+	// runCase 注入 get=(rows,cols)，返回捕获到的 setsize 序列。
+	runCase := func(t *testing.T, rows, cols int, getErr error) []pty.Winsize {
+		t.Helper()
+		var sizes []pty.Winsize
+		ptyGetsize = func(*os.File) (int, int, error) { return rows, cols, getErr }
+		ptySetsize = func(_ *os.File, ws *pty.Winsize) error { sizes = append(sizes, *ws); return nil }
+		if err := newSess().ForceResizeCurrent(); err != nil {
+			t.Fatalf("ForceResizeCurrent: %v", err)
+		}
+		return sizes
+	}
+
+	// assertSignalingTail 校验 setsize 序列形状：最终尺寸为基准 (cols,rows)，
+	// 且最后两次为不同的非零→非零变更（保证 SIGWINCH 可投递）。
+	assertSignalingTail := func(t *testing.T, sizes []pty.Winsize, cols, rows int) {
+		t.Helper()
+		if len(sizes) != 3 {
+			t.Fatalf("set calls = %d, want 3 (baseline + jitter + restore): %+v", len(sizes), sizes)
+		}
+		base, jitter, last := sizes[0], sizes[1], sizes[2]
+		if base.Cols != uint16(cols) || base.Rows != uint16(rows) {
+			t.Errorf("baseline set = %+v, want cols=%d rows=%d", base, cols, rows)
+		}
+		// 最后两次必须不同（真实变化 → 内核 tty_do_resize 不短路 → SIGWINCH）。
+		if jitter == last {
+			t.Errorf("last two sets must differ to emit SIGWINCH, got %+v twice", jitter)
+		}
+		if last != base {
+			t.Errorf("final set = %+v, want restore to baseline %+v", last, base)
+		}
+		// 最后两次均须为非零（本沙箱下非零→非零才投递信号）。
+		for i, ws := range []pty.Winsize{jitter, last} {
+			if ws.Cols < 1 || ws.Rows < 1 {
+				t.Errorf("signaling set[%d] = %+v, must be non-zero", i, ws)
+			}
+		}
+	}
+
+	t.Run("existing-size", func(t *testing.T) {
+		// 常规非零 (cols=54, rows=121)：54,121 → 53,120 → 54,121。
+		sizes := runCase(t, 121, 54, nil)
+		assertSignalingTail(t, sizes, 54, 121)
+		if sizes[1].Cols != 53 || sizes[1].Rows != 120 {
+			t.Errorf("jitter set = %+v, want cols=53 rows=120", sizes[1])
+		}
+	})
+
+	t.Run("never-resized", func(t *testing.T) {
+		// 关键：0×0 由 get 返回 → 归一为 80x24，再做非零→非零抖动：
+		// 80,24 → 79,23 → 80,24（修复前只 Setsize(80,24) 一次，无 SIGWINCH）。
+		sizes := runCase(t, 0, 0, nil)
+		assertSignalingTail(t, sizes, 80, 24)
+		if sizes[1].Cols != 79 || sizes[1].Rows != 23 {
+			t.Errorf("jitter set = %+v, want cols=79 rows=23", sizes[1])
+		}
+	})
+
+	t.Run("one-by-one-boundary", func(t *testing.T) {
+		// (cols=1, rows=1)：无维度可减，派生必须 != (1,1) 且两维 >=1（不得出现 0）。
+		sizes := runCase(t, 1, 1, nil)
+		assertSignalingTail(t, sizes, 1, 1)
+		jitter := sizes[1]
+		if jitter == sizes[0] {
+			t.Errorf("jitter = %+v must differ from (1,1)", jitter)
+		}
+		for i, ws := range sizes {
+			if ws.Cols < 1 || ws.Rows < 1 {
+				t.Errorf("set[%d] = %+v, want cols/rows >= 1", i, ws)
+			}
+		}
+	})
+
+	t.Run("one-column-boundary", func(t *testing.T) {
+		// (cols=1, rows=5)：cols 保持 1，仅 rows 变化 → 抖动应 != (1,5) 且 >=1。
+		sizes := runCase(t, 5, 1, nil)
+		assertSignalingTail(t, sizes, 1, 5)
+		jitter := sizes[1]
+		if jitter == sizes[0] {
+			t.Errorf("jitter = %+v must differ from (1,5)", jitter)
+		}
+		for i, ws := range sizes {
+			if ws.Cols < 1 || ws.Rows < 1 {
+				t.Errorf("set[%d] = %+v, want cols/rows >= 1", i, ws)
+			}
+		}
+	})
+
+	t.Run("closed", func(t *testing.T) {
+		called := false
+		ptyGetsize = func(*os.File) (int, int, error) { called = true; return 0, 0, nil }
+		ptySetsize = func(*os.File, *pty.Winsize) error { called = true; return nil }
+
+		s := newSess()
+		s.closed = true
+		if err := s.ForceResizeCurrent(); err == nil {
+			t.Error("ForceResizeCurrent on closed session should return error")
+		}
+		if called {
+			t.Error("closed session should not touch pty get/set")
+		}
+	})
+
+	t.Run("get-error", func(t *testing.T) {
+		// get 失败：直接返回 error，不调用 set。
+		sentinel := os.ErrInvalid
+		setCalled := false
+		ptyGetsize = func(*os.File) (int, int, error) { return 0, 0, sentinel }
+		ptySetsize = func(*os.File, *pty.Winsize) error { setCalled = true; return nil }
+		if err := newSess().ForceResizeCurrent(); err != sentinel {
+			t.Errorf("ForceResizeCurrent get-error = %v, want %v", err, sentinel)
+		}
+		if setCalled {
+			t.Error("setsize must not be called when getsize fails")
+		}
+	})
 }
 
 // TestSyncCommandsSingleLineShellSyntax 校验所有同步命令为**完全单行**且 shell 语法合法。

@@ -17,12 +17,21 @@ type loginRequest struct {
 
 // loginResponse 登录成功响应体。
 type loginResponse struct {
-	Token    string `json:"token"`
-	Username string `json:"username"`
+	// MgmtToken 登录后签发的用户级管理凭证（可重复使用，用于所有会话级操作）。
+	MgmtToken string `json:"mgmt_token"`
+	Username  string `json:"username"`
 	// OpencodeEnabled 是否启用 opencode 模式，供前端决定是否展示「打开 opencode」选项。
 	OpencodeEnabled bool `json:"opencode_enabled"`
 	// CodexEnabled 是否启用 codex 模式，供前端决定是否展示「打开 Codex」选项。
 	CodexEnabled bool `json:"codex_enabled"`
+	// SessionTTLHours 新增长期会话的默认时长（小时）。
+	SessionTTLHours float64 `json:"session_ttl_hours"`
+	// MaxSessionTTLHours 单次输入最大时长（小时，新建与延期共用）。
+	MaxSessionTTLHours float64 `json:"max_session_ttl_hours"`
+	// MaxLongSessions 每用户长期会话数量上限。
+	MaxLongSessions int `json:"max_long_sessions"`
+	// MaxTotalSessions 每用户会话总数上限（长+短）。
+	MaxTotalSessions int `json:"max_total_sessions"`
 }
 
 // errorResponse 错误响应体。
@@ -71,8 +80,8 @@ func loginLogName(raw string) string {
 }
 
 // Login 处理 POST /api/login。
-// opencodeEnabled / codexEnabled 表示对应模式是否启用，随登录响应返回给前端。
-func Login(a *auth.Authenticator, opencodeEnabled, codexEnabled bool) http.HandlerFunc {
+// 响应携带 mgmt_token 及会话相关配置（默认/最大时长、名额上限），供前端渲染。
+func Login(a *auth.Authenticator, cfg *auth.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -94,7 +103,7 @@ func Login(a *auth.Authenticator, opencodeEnabled, codexEnabled bool) http.Handl
 		}
 
 		// 日志只记录安全标识名（邮箱绝不打印原文）与错误 sentinel，绝不记录密码。
-		token, username, _, err := a.Login(req.Username, req.Password)
+		mgmtToken, username, _, err := a.Login(req.Username, req.Password)
 		if err != nil {
 			status, msg := loginStatus(err)
 			log.Printf("login failed for account %q: %v", loginLogName(req.Username), err)
@@ -103,6 +112,15 @@ func Login(a *auth.Authenticator, opencodeEnabled, codexEnabled bool) http.Handl
 		}
 
 		log.Printf("login %q ok", username)
-		writeJSON(w, http.StatusOK, loginResponse{Token: token, Username: username, OpencodeEnabled: opencodeEnabled, CodexEnabled: codexEnabled})
+		writeJSON(w, http.StatusOK, loginResponse{
+			MgmtToken:          mgmtToken,
+			Username:           username,
+			OpencodeEnabled:    cfg.Opencode.Enabled,
+			CodexEnabled:       cfg.Codex.Enabled,
+			SessionTTLHours:    cfg.SessionTTLHours,
+			MaxSessionTTLHours: cfg.MaxSessionTTLHours,
+			MaxLongSessions:    cfg.MaxLongN,
+			MaxTotalSessions:   cfg.MaxTotalN,
+		})
 	}
 }

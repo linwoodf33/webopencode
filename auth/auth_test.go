@@ -18,7 +18,7 @@ func newTestAuth(t *testing.T) *Authenticator {
 		},
 		RequirePassword: false, // 目录查询模式，方便不传密码回归
 		ADTimeout:       time.Second,
-		TokenTTLd:       5 * time.Minute,
+		MgmtTTLd:        8 * time.Hour,
 	}
 	return NewAuthenticator(cfg)
 }
@@ -60,7 +60,7 @@ func TestLoginRequirePasswordMissingPassword(t *testing.T) {
 		},
 		RequirePassword: true,
 		ADTimeout:       time.Second,
-		TokenTTLd:       5 * time.Minute,
+		MgmtTTLd:        8 * time.Hour,
 	}
 	a := NewAuthenticator(cfg)
 
@@ -146,48 +146,37 @@ func pad(n int) string {
 	return s
 }
 
-// issueFor 绕过 AD，直接向认证器内置 token 存储签发 token（用于测试消费/校验逻辑）。
+// issueFor 绕过 AD，直接向认证器内置 mgmt 存储签发 token（用于测试校验/吊销逻辑）。
 func (a *Authenticator) issueFor(t *testing.T, username string) string {
 	t.Helper()
-	tok, err := a.token.Issue(username)
+	tok, err := a.mgmt.Issue(username)
 	if err != nil {
 		t.Fatalf("Issue(%q): %v", username, err)
 	}
 	return tok
 }
 
-func TestValidateAndConsume(t *testing.T) {
+func TestAuthenticatorMgmtWrappers(t *testing.T) {
 	a := newTestAuth(t)
 
-	// 无效 token。
-	if _, _, err := a.ValidateAndConsume("bogus"); err != ErrInvalidToken {
-		t.Errorf("ValidateAndConsume(bogus) = %v, want ErrInvalidToken", err)
+	// 无效 mgmt token。
+	if _, ok := a.ValidateMgmt("bogus"); ok {
+		t.Error("ValidateMgmt(bogus) should fail")
 	}
 
-	// 为系统存在且格式合法的用户（nobody）签发并消费。
 	tok := a.issueFor(t, "nobody")
-	user, home, err := a.ValidateAndConsume(tok)
-	if err != nil {
-		t.Fatalf("ValidateAndConsume valid: %v", err)
+	user, ok := a.ValidateMgmt(tok)
+	if !ok || user != "nobody" {
+		t.Fatalf("ValidateMgmt valid: ok=%v user=%q", ok, user)
 	}
-	if user != "nobody" || home == "" {
-		t.Errorf("got user=%q home=%q", user, home)
-	}
-
-	// 重放（已消费）必须失败。
-	if _, _, err := a.ValidateAndConsume(tok); err != ErrInvalidToken {
-		t.Errorf("replay = %v, want ErrInvalidToken", err)
+	// 幂等：可重复校验。
+	if user, ok := a.ValidateMgmt(tok); !ok || user != "nobody" {
+		t.Fatalf("ValidateMgmt repeat: ok=%v user=%q", ok, user)
 	}
 
-	// 为 root 签发 → 消费时兜底校验拒绝（即使 token 有效）。
-	tokRoot := a.issueFor(t, "root")
-	if _, _, err := a.ValidateAndConsume(tokRoot); err != ErrRootNotAllowed {
-		t.Errorf("root = %v, want ErrRootNotAllowed", err)
-	}
-
-	// 为非法格式用户名签发（不经过 Login 不会触发，直接绕过模拟异常状态）→ 兜底校验拒绝。
-	tokBad := a.issueFor(t, "Bad Name")
-	if _, _, err := a.ValidateAndConsume(tokBad); err != ErrInvalidFormat {
-		t.Errorf("bad name = %v, want ErrInvalidFormat", err)
+	// 吊销后失效。
+	a.RevokeMgmt(tok)
+	if _, ok := a.ValidateMgmt(tok); ok {
+		t.Error("ValidateMgmt after revoke should fail")
 	}
 }

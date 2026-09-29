@@ -114,8 +114,8 @@ type localSession struct {
 
 | 凭证 | 签发 | TTL | 用途 | 语义 | 存放 |
 |---|---|---|---|---|---|
-| mgmt_token | `/api/login` | `mgmt_ttl_hours`（默认 8h） | 列表 / 新建 / 恢复 / 延期 / 关闭 / 上传（所有会话级操作） | 可重复、绑定 username | 服务端内存 `MgmtTokenStore` |
-| ticket（一次性） | `/api/session/ticket`（Bearer mgmt） | 60s | 仅用于建立一次 WebSocket | 一次性、消费防重放 | 服务端内存 |
+| mgmt_token | `/api/login` | `mgmt_ttl_hours`（默认 8h） | 列表 / 新建 / 恢复 / 延期 / 关闭 / 上传（所有会话级操作） | 可重复、绑定 username | 服务端内存 `MgmtTokenStore`（Cleanup：ticket 30s、mgmt 5min ticker，`StartCleanup`） |
+| ticket（一次性） | `/api/session/ticket`（Bearer mgmt） | 固定 60s 常量，不可配置 | 仅用于建立一次 WebSocket | 一次性、消费防重放 | 服务端内存 `TicketStore` |
 | sessionID | 建会话时生成 | 会话存活期 | 会话**标识**（非机密） | 仅作 ID；接入需 ticket | 服务端 + 前端 |
 
 ### 4.2 关键约定
@@ -131,8 +131,12 @@ type localSession struct {
 
 `mgmt_token` 是 8h 的用户级 bearer，若被 XSS 窃取可完全接管该用户全部终端（= 以该用户执行命令）。缓解措施：
 
-1. **前端依赖自托管**：xterm.js / addon-fit 目前来自 `cdn.jsdelivr.net`，改为随二进制 `//go:embed` 内嵌（与 `static/` 一并），消除 CDN 投毒/中间人窃取路径。
-2. **CSP**：`default-src 'self'`，禁止内联脚本；不引入外部脚本。
+1. **前端依赖自托管**：xterm.js / addon-fit 已随二进制 `//go:embed` 内嵌，实体位于 `static/vendor/`（`xterm.css` / `xterm.js` / `addon-fit.js`），消除 CDN 投毒/中间人窃取路径。
+2. **CSP（最终裁决，逐字节）**：
+   ```
+   default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+   ```
+   禁止内联脚本、不引入外部脚本，`Cache-Control: no-store` 保持。`style-src` 放行 `'unsafe-inline'` 的原因：vendored xterm.js 运行时通过 `document.createElement("style")` 动态注入样式，严格 `style-src 'self'` 会拦截致终端渲染异常；脚本面仍 `'self'` 封闭，XSS 增量低。内联 `style=""` 已改为 `.hidden` class；运行时动态样式与 CSSOM 赋值（如 `el.style.width=`）本不受 `style-src` 限制。
 3. 前端一律用 `textContent`/`createElement` 渲染动态内容（现有代码已是如此，继续保持，禁 `innerHTML` 拼用户串）。
 4. 可选增强：mgmt_token 改为 **HttpOnly + Secure + SameSite=Lax Cookie**（JS 不可读），配合 CSRF token；WS/HTTP 依赖 Cookie。代价是 CSRF 防护与多标签共享，需评估。**基线方案（1-3）先行**。
 5. ticket 一次性、60s，写 URL 可接受。
@@ -173,6 +177,15 @@ type SessionIndex interface {
 - 配置（默认/最大时长、名额）**不放在 store**，由 `handler` 从 `auth.Config` 读取后作为参数传入。
 - `memoryIndex`：内存 map + 统一 reaper。
 - `redisIndex`（未来）：元数据 Hash + 按 username 的索引/ZSet + TTL；`OwnerOf` 指向持有 `localSession` 的节点（§12）。
+
+### 5.3 锁层级与关闭顺序（编码约束 R1–R4）
+
+- **R1（联合持锁序）**：需同时持多锁时，固定顺序为 `indexMu → mgrMu → sMu`，禁止逆序。
+- **R2（索引锁内不回调）**：持有 `indexMu` 时绝不回调会话/pty（不得获取 `mgrMu`/`sMu`，不得调用 manager/localSession 方法）。
+- **R3（统一六步 Close）**：一切会话终结统一走 `manager.Close`（幂等），六步同序——① `mgrMu` 取 ls；② `sMu` 内判 `closed` 并置位、摘 conn 后立即释放；③ 锁外通知旧 conn（close 消息 + Close）；④ 锁外 `proc.Close()`；⑤ 再取 `indexMu` 做 Remove；⑥ `mgrMu` delete。绝不持锁做网络写或 `pty.Close`。
+- **R4（reaper 快照）**：`ReapOnce` 在索引锁内仅取过期快照（id 列表），释放锁后再逐个调用 `closeFn`（即 `manager.Close`）；`runReaper` 按 `reaperInterval`（默认 30s）驱动。
+
+**短期过期判定**：未 attached 且超过 `expireAt` 才过期，以索引中的 `Attached` 状态为准。`expired()` 语义：长期 `now >= expireAt`（无论是否 attached）；短期 `!Attached && now >= expireAt`。
 
 ---
 
@@ -220,7 +233,8 @@ type SessionIndex interface {
 - 到点回收附着的长期会话：向连接下发 `close`（「会话已到期」）→ `proc.Close()` kill 进程树。
 - 巡检间隔 30s，实际 kill 在到期后 ≤30s。
 - **临近到期提醒**（可选，P1 建议）：到期前 10/5 分钟随输出或单独消息提示，方便用户延期。
-- **锁层级**（避免死锁，编码约束）：统一 **先索引锁、后会话锁**；`closeSession` 须先释放会话锁再操作索引（现实现已如此，修订后保持）。索引实现内不得在持锁时回调会话锁。
+- **短期过期判定**：未 attached（索引 `Attached=false`）且 `now >= expireAt` 才回收；长期则无论是否 attached 到点即回收。
+- **锁层级与关闭顺序**（编码约束 R1–R4，详见 §5.3）：联合持锁序固定 `indexMu → mgrMu → sMu`（R1）；索引锁内不回调会话/pty（R2）；一切 close 走 `manager.Close` 六步幂等（R3）；reaper 锁内取过期快照、锁外 Close（R4）。
 
 ---
 
@@ -230,14 +244,16 @@ type SessionIndex interface {
 
 | 方法 | 路径 | 凭证 | 说明 |
 |---|---|---|---|
-| POST | `/api/login` | - | 响应新增 `mgmt_token`、`session_ttl_hours`（默认时长）、`max_session_ttl_hours`（单次上限）、`max_long_sessions`、`max_total_sessions` |
+| POST | `/api/login` | - | 响应为 `mgmt_token` + `username` + `opencode_enabled`/`codex_enabled` + 配置项 `session_ttl_hours`（默认时长）、`max_session_ttl_hours`（单次上限）、`max_long_sessions`、`max_total_sessions`（旧 `token` 字段已去除） |
 | POST | `/api/logout` | mgmt | 吊销 mgmt_token |
 | GET | `/api/sessions` | mgmt | 实时返回该用户 `SessionInfo[]` |
 | POST | `/api/session/ticket` | mgmt | body: `{action:"create\|attach", session?, mode?, type?, hours?}` → `{ticket, expires_in}`；在此完成**全部校验**（归属、名额、hours 范围） |
 | POST | `/api/session/extend?session=<id>&hours=<n>` | mgmt | 仅长期；`expireAt += n 小时`；`1 ≤ n ≤ max_session_ttl_hours`；返回新 `expire_at` |
 | POST | `/api/session/close?session=<id>` | mgmt | 校验归属并关闭 |
-| GET | `/api/resume` | mgmt | 探测会话是否可恢复（供刷新场景），返回 `{ok, mode, long_lived}`（不再用 sessionID 作凭证） |
+| GET | `/api/resume` | mgmt | **mgmt 认证，仅探测不消费 ticket**：探测会话是否可恢复（供刷新场景），返回 `{ok, mode, long_lived}`；仅读索引、不触碰 ticket（不再用 sessionID 作凭证） |
 | GET/POST | `/api/upload-check`、`/api/upload` | mgmt | 改为 mgmt + 归属校验（统一凭证） |
+
+> **`RequireMgmt` 中间件**：包装所有会话级路由，要求 `Authorization: Bearer <mgmt_token>`；校验通过后将 username 注入 request context（键 `ctxUserKey`），缺凭证 / 无效或过期均返回 401。`/api/login` 与 `/ws`（走 ticket）不经该中间件。
 
 `SessionInfo`：
 
@@ -310,8 +326,7 @@ type SessionIndex interface {
 | `max_session_ttl_hours` | **单次**输入最大时长（新建与延期共用，即"最大增量"） | 168 | 超限拒绝 |
 | `max_long_sessions` | 每用户长期会话数量上限 | 3 | |
 | `max_total_sessions` | 每用户会话总数上限（长+短） | 10 | 防短期无序创建 |
-| `mgmt_ttl_hours` | 管理 token 有效期 | 8 | 一个工作日 |
-| `token_ttl` | （保留）一次性 token 通用 TTL（秒） | 300 | 与 ticket 60s 区分：ticket 独立常量 |
+| `mgmt_ttl_hours` | 管理 token 有效期 | 8 | 一个工作日；对应 `MgmtTokenStore` 的 TTL（ticket 固定 60s 常量，不可配置） |
 | （短期会话） | 空闲保活 | 5min | 硬编码 |
 
 派生值（`auth.Config`）：
@@ -333,15 +348,16 @@ MaxTotalN     int           // max_total_sessions
 | `auth/config.go` | 新增 `session_ttl_hours` / `max_session_ttl_hours` / `max_long_sessions` / `max_total_sessions` / `mgmt_ttl_hours` 及派生值；`ExampleConfig` 同步 |
 | `config.example.yaml` | 同步上述配置项 |
 | `auth/mgmt.go`（新增） | `MgmtTokenStore`：`Issue` / `Validate` / `Revoke` |
-| `auth/ticket.go`（新增） | `TicketStore`：一次性、60s、携带已校验意图 |
+| `auth/ticket.go`（新增，改写自旧 `auth/token.go`） | `TicketStore`：一次性、固定 60s、携带已校验意图 |
 | `auth/auth.go` | 新增 `IssueMgmt` / `ValidateMgmt` / `RevokeMgmt` |
-| `handler/manager.go`（新增） | `SessionManager`（持有 pty）+ `localSession` + 迁入 attach/detach/pump/closeSession |
-| `handler/index.go`（新增） | `SessionIndex` 接口 + `memoryIndex` + 分叉 reaper（统一锁层级） |
+| `handler/manager.go`（新增，拆自旧 `handler/session_hub.go`） | `SessionManager`（持有 pty）+ `localSession` + 迁入 attach/detach/pump/六步 closeSession |
+| `handler/index.go`（新增，拆自旧 `handler/session_hub.go`） | `SessionIndex` 接口 + `memoryIndex` + 分叉 reaper（统一锁层级 R1–R4） |
 | `handler/session_api.go`（新增） | `NewSessionsHandler`(list)、`NewTicketHandler`、`NewExtendHandler`、`NewCloseHandler`、`NewLogoutHandler`；`requireMgmt` 中间件 |
 | `handler/ws.go` | 改为消费 `ticket`；create/attach 分派 |
 | `handler/login.go` | 响应带 `mgmt_token` 与新配置项 |
 | `handler/upload.go` | 凭证改为 mgmt + 归属校验 |
 | `main.go` | 建 manager/index/store，注入；注册新路由（含 `/api/logout`） |
+| `static/vendor/`（新增） | 自托管 xterm：`xterm.css` / `xterm.js` / `addon-fit.js`（`//go:embed` 内嵌，已去除 sourceMappingURL 注释） |
 | `static/index.html` | 内嵌 xterm（去 CDN）+ CSP；会话面板（列表 + 新建 类型/时长/模式 + 登出）；工具条「会话」按钮 |
 | `static/app.js` | mgmt 存取；实时列表；ticket 换发；进入/新建/延期/关闭；`type`/`hours` 透传 |
 | `static/css/style.css` | 列表与新建区样式 |
@@ -397,6 +413,18 @@ MaxTotalN     int           // max_total_sessions
 | `MgmtTokenStore` / `TicketStore` 单元 | 签发 / 校验 / 过期 / 重放拒绝 |
 | 并发创建抢名额 | 恰好不超额（Register 内二次校验） |
 | reaper 与 attach/close 竞态 | 无死锁、无双重关闭 |
+| ticket / mgmt Cleanup 过期（`Cleanup`） | 过期记录被清理，未过期保留 |
+| `MgmtTokenStore` / `TicketStore` 的 `StartCleanup`（interval<=0 noop、ctx 取消退出） | 不启动 / 正常退出 |
+| 时钟注入钩子 `ReapOnce`（`SetNow`） | 按注入时钟判定并回收，无需真实等待 |
+| 上传：无 mgmt | 401 |
+| 上传：他人会话 | 404 |
+| 上传：已关闭会话 | 404 |
+| 上传：不存在的会话 | 404 |
+| 上传：正常上传 | 200 |
+| upload-check：正常 | 200 |
+| 上传：只读目录 | 400 |
+| WS：ticket 重放 | 第二次 401 |
+| WS：仅 sessionID（无 ticket） | 401 |
 
 ---
 

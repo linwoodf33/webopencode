@@ -193,7 +193,8 @@ ad:
   timeout: 5
 
 require_password: true
-token_ttl: 300
+# token_ttl 已移除（ticket TTL 为固定 60s 常量，不可配置；会话/凭证配置见
+# config.example.yaml 的 mgmt_ttl_hours 等，本行为旧版残留标注）
 listen: "0.0.0.0:8090"              # 端口可改
 
 opencode:

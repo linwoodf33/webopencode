@@ -16,8 +16,6 @@ var (
 	ErrRootNotAllowed = errors.New("root is not allowed")
 	// ErrNotProvisioned 系统不存在该用户。对应 403。
 	ErrNotProvisioned = errors.New("user not provisioned on this host")
-	// ErrInvalidToken 一次性 token 无效/过期/已消费。用于 WS 升级前校验，对应 401。
-	ErrInvalidToken = errors.New("invalid or expired token")
 )
 
 // usernameRegexp 校验用户名格式：小写字母/下划线开头，后续可含数字、下划线、连字符，最长 32。
@@ -37,7 +35,7 @@ type resolvedUser struct {
 // Authenticator 封装「AD 认证 + 正则 + 非root + 系统存在」的完整校验流程。
 type Authenticator struct {
 	ad              *ADClient
-	token           *TokenStore
+	mgmt            *MgmtTokenStore
 	requirePassword bool
 }
 
@@ -45,7 +43,7 @@ type Authenticator struct {
 func NewAuthenticator(cfg *Config) *Authenticator {
 	return &Authenticator{
 		ad:              NewADClient(cfg),
-		token:           NewTokenStore(cfg.TokenTTLd),
+		mgmt:            NewMgmtTokenStore(cfg.MgmtTTLd),
 		requirePassword: cfg.RequirePassword,
 	}
 }
@@ -53,8 +51,20 @@ func NewAuthenticator(cfg *Config) *Authenticator {
 // ADClient 暴露 AD 客户端（供诊断使用）。
 func (a *Authenticator) ADClient() *ADClient { return a.ad }
 
+// MgmtStore 暴露 mgmt_token 存储（供路由 requireMgmt 中间件使用）。
+func (a *Authenticator) MgmtStore() *MgmtTokenStore { return a.mgmt }
+
 // RequirePassword 返回是否要求 AD 密码强认证。
 func (a *Authenticator) RequirePassword() bool { return a.requirePassword }
+
+// IssueMgmt 签发一个 mgmt_token（绑定 username）。
+func (a *Authenticator) IssueMgmt(username string) (string, error) { return a.mgmt.Issue(username) }
+
+// ValidateMgmt 校验 mgmt_token，返回绑定用户名。幂等，不消费。
+func (a *Authenticator) ValidateMgmt(raw string) (string, bool) { return a.mgmt.Validate(raw) }
+
+// RevokeMgmt 吊销 mgmt_token（/api/logout）。幂等。
+func (a *Authenticator) RevokeMgmt(raw string) { a.mgmt.Revoke(raw) }
 
 // ResolveAccount 将原始登录标识（纯账号名或邮箱）解析为内部 resolvedUser。
 //   - 含 @ → 视为邮箱：过 emailRegexp（失败→ErrInvalidEmail），调 AD 反查解析（无命中→ErrUserNotFound）。
@@ -98,9 +108,9 @@ func (a *Authenticator) ResolveAccount(rawLogin string) (*resolvedUser, error) {
 //  4. 解析标识：邮箱 → AD 反查取 sAMAccountName/DN/UAC；账号名 → 直接用该名；
 //  5. AD 认证：requirePassword 开启 → 用户 DN+密码 bind 强认证；关闭 → 目录查询模式；
 //  6. 系统存在校验（用解析出的 sAMAccountName），取 HomeDir 用于工作目录；
-//  7. 签发一次性 token。
+//  7. 签发 mgmt_token（可重复使用的用户级管理凭证）。
 //
-// 返回 token、规范化用户名（解析后的 sAMAccountName）、HomeDir。错误为 sentinel error。
+// 返回 mgmt_token、规范化用户名（解析后的 sAMAccountName）、HomeDir。错误为 sentinel error。
 func (a *Authenticator) Login(rawUsername, rawPassword string) (token, username, homeDir string, err error) {
 	// 1. 空用户名直接拒绝。
 	if rawUsername == "" {
@@ -176,8 +186,8 @@ func (a *Authenticator) Login(rawUsername, rawPassword string) (token, username,
 		return "", "", "", ErrNotProvisioned
 	}
 
-	// 8. 签发一次性 token。
-	tok, terr := a.token.Issue(username)
+	// 8. 签发 mgmt_token。
+	tok, terr := a.mgmt.Issue(username)
 	if terr != nil {
 		return "", "", "", ErrServiceUnavailable
 	}
@@ -191,26 +201,4 @@ func (a *Authenticator) resolveForLogin(rawLogin string, hasAt bool) (*resolvedU
 		return a.ad.ResolveEmail(rawLogin)
 	}
 	return &resolvedUser{sAMAccountName: rawLogin}, nil
-}
-
-// ValidateAndConsume 校验并消费一次性 token，返回绑定的用户名与 HomeDir。
-// 并对用户名做兜底校验（正则 + 非root + 系统存在），任一失败即拒绝。
-// token 无效/过期/已消费返回 ErrInvalidToken。
-func (a *Authenticator) ValidateAndConsume(token string) (username, homeDir string, err error) {
-	username, ok := a.token.Consume(token)
-	if !ok {
-		return "", "", ErrInvalidToken
-	}
-
-	if username == "" || !usernameRegexp.MatchString(username) {
-		return "", "", ErrInvalidFormat
-	}
-	if username == "root" {
-		return "", "", ErrRootNotAllowed
-	}
-	u, uerr := user.Lookup(username)
-	if uerr != nil {
-		return "", "", ErrNotProvisioned
-	}
-	return username, u.HomeDir, nil
 }

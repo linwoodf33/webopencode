@@ -29,7 +29,11 @@ ad:
   tls_insecure: true
   timeout: 7
 require_password: true
-token_ttl: 120
+session_ttl_hours: 10
+max_session_ttl_hours: 100
+max_long_sessions: 5
+max_total_sessions: 20
+mgmt_ttl_hours: 6
 `)
 	cfg, err := LoadConfig(path)
 	if err != nil {
@@ -56,13 +60,34 @@ token_ttl: 120
 	if cfg.ADTimeout != 7*time.Second {
 		t.Errorf("ADTimeout = %v, want 7s", cfg.ADTimeout)
 	}
-	if cfg.TokenTTLd != 120*time.Second {
-		t.Errorf("TokenTTLd = %v, want 120s", cfg.TokenTTLd)
+	if cfg.SessionTTLHours != 10 {
+		t.Errorf("SessionTTLHours = %v, want 10", cfg.SessionTTLHours)
+	}
+	if cfg.SessionTTLd != 10*time.Hour {
+		t.Errorf("SessionTTLd = %v, want 10h", cfg.SessionTTLd)
+	}
+	if cfg.MaxSessionTTLHours != 100 {
+		t.Errorf("MaxSessionTTLHours = %v, want 100", cfg.MaxSessionTTLHours)
+	}
+	if cfg.MaxAttachTTL != 100*time.Hour {
+		t.Errorf("MaxAttachTTL = %v, want 100h", cfg.MaxAttachTTL)
+	}
+	if cfg.MaxLongN != 5 {
+		t.Errorf("MaxLongN = %d, want 5", cfg.MaxLongN)
+	}
+	if cfg.MaxTotalN != 20 {
+		t.Errorf("MaxTotalN = %d, want 20", cfg.MaxTotalN)
+	}
+	if cfg.MgmtTTLHours != 6 {
+		t.Errorf("MgmtTTLHours = %v, want 6", cfg.MgmtTTLHours)
+	}
+	if cfg.MgmtTTLd != 6*time.Hour {
+		t.Errorf("MgmtTTLd = %v, want 6h", cfg.MgmtTTLd)
 	}
 }
 
 func TestLoadConfigDefaults(t *testing.T) {
-	// 未显式设置 timeout / token_ttl / listen 时走默认值。
+	// 未显式设置 timeout / 会话配置 / listen 时走默认值。
 	path := writeTempConfig(t, `
 ad:
   server: "ldaps.example.com:636"
@@ -77,8 +102,20 @@ ad:
 	if cfg.ADTimeout != DefaultADTimeout {
 		t.Errorf("ADTimeout = %v, want default %v", cfg.ADTimeout, DefaultADTimeout)
 	}
-	if cfg.TokenTTLd != DefaultTokenTTL {
-		t.Errorf("TokenTTLd = %v, want default %v", cfg.TokenTTLd, DefaultTokenTTL)
+	if cfg.SessionTTLd != time.Duration(DefaultSessionTTLHours)*time.Hour {
+		t.Errorf("SessionTTLd = %v, want default", cfg.SessionTTLd)
+	}
+	if cfg.MaxAttachTTL != time.Duration(DefaultMaxSessionTTLHours)*time.Hour {
+		t.Errorf("MaxAttachTTL = %v, want default", cfg.MaxAttachTTL)
+	}
+	if cfg.MgmtTTLd != time.Duration(DefaultMgmtTTLHours)*time.Hour {
+		t.Errorf("MgmtTTLd = %v, want default", cfg.MgmtTTLd)
+	}
+	if cfg.MaxLongN != DefaultMaxLongSessions {
+		t.Errorf("MaxLongN = %d, want default %d", cfg.MaxLongN, DefaultMaxLongSessions)
+	}
+	if cfg.MaxTotalN != DefaultMaxTotalSessions {
+		t.Errorf("MaxTotalN = %d, want default %d", cfg.MaxTotalN, DefaultMaxTotalSessions)
 	}
 	if cfg.RequirePassword {
 		t.Error("require_password should default to false")

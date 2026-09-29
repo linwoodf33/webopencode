@@ -109,7 +109,13 @@ ad:
   timeout: 5                       # AD 连接/操作超时（秒）
 
 require_password: true             # true=密码强认证；false=仅目录查询
-token_ttl: 300                     # 一次性 token 有效期（秒）
+
+# 会话有效期配置（P1 新增；原 token_ttl: 300 已移除）
+session_ttl_hours: 24              # 新增长期会话的默认时长（小时），默认 24
+max_session_ttl_hours: 168         # 单次输入最大时长（小时，新建与延期共用），默认 168
+max_long_sessions: 3               # 每用户长期会话数量上限，默认 3
+max_total_sessions: 10             # 每用户会话总数上限（长+短），默认 10
+mgmt_ttl_hours: 8                  # 管理 token（mgmt_token）有效期（小时），默认 8
 
 # opencode 模式：登录后由用户选择进入 opencode TUI 或 bash
 opencode:

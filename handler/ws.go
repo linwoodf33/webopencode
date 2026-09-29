@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"time"
@@ -19,54 +20,67 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-// NewWs 处理 /ws 端点，支持两种接入：
+// wsClose 向连接发送 close 消息并关闭。
+func wsClose(conn *websocket.Conn, reason string) {
+	payload, _ := protocol.CloseMessage(reason).Marshal()
+	_ = conn.WriteMessage(websocket.TextMessage, payload)
+	_ = conn.Close()
+}
+
+// NewWs 处理 /ws?ticket=<t> 端点。
 //
-//  1. 新会话：校验 ?token= 一次性 token，取出绑定的用户名并再次兜底校验
-//     （正则 + 非root + 系统存在），然后以该用户 sudo 启动会话。
-//  2. 恢复会话：?session=<id>&username=<user> 命中会话仓库中仍存活的 pty 会话
-//     （页面刷新后自动重连），重新附着到同一终端，正在运行的进程不丢失。
+// 统一接入：先消费一次性 ticket（action=create|attach），再升级 WebSocket。
+//   - action=create：用 ticket 内已校验的 Username/HomeDir/Mode/Type/Hours 创建
+//     pty 会话并附着；
+//   - action=attach：附着到 ticket 指定的会话（服务端再兜底校验存活/未过期）。
 //
-// 无论哪种方式，升级为 WebSocket 后都附着（attach）到 hub 中的会话；连接断开
-// （刷新/断线）时仅分离（detach）而不销毁会话，保留 sessionTTL 等待重连。
-func NewWs(authr *auth.Authenticator, opencodeCfg *auth.OpencodeConfig, codexCfg *auth.CodexConfig, sandboxCfg *auth.SandboxConfig, hub *sessionHub) http.HandlerFunc {
+// ticket 无效/过期/重放，或仅凭 sessionID（无 ticket）→ 401（升级前拒绝）。
+func NewWs(mgr *SessionManager, tickets *auth.TicketStore, cfg *auth.Config) http.HandlerFunc {
+	opencodeCfg := &cfg.Opencode
+	codexCfg := &cfg.Codex
+	sandboxCfg := &cfg.Sandbox
+
 	return func(w http.ResponseWriter, r *http.Request) {
-		// 1. 尝试恢复已存在的会话（页面刷新后自动重连）。
-		sid := r.URL.Query().Get("session")
-		username := r.URL.Query().Get("username")
-		resuming := sid != ""
-		var hs *hubSession
-		if resuming {
-			hs = hub.get(sid)
-			if hs == nil || hs.username != username || hs.isClosed() {
-				log.Printf("ws: resume failed for session %q user %q", sid, username)
-				writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "session not found or expired"})
-				return
-			}
+		raw := r.URL.Query().Get("ticket")
+		purpose, ok := tickets.Consume(raw)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "invalid or expired ticket"})
+			return
 		}
 
-		// 2. 升级为 WebSocket。
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			log.Printf("websocket upgrade failed: %v", err)
 			return
 		}
 
-		// 3. 新会话：校验一次性 token 并启动会话。
-		if !resuming {
-			token := r.URL.Query().Get("token")
-			uname, homeDir, verr := authr.ValidateAndConsume(token)
-			if verr != nil {
-				log.Printf("ws: token validation failed: %v", verr)
-				payload, _ := protocol.CloseMessage("invalid or expired token").Marshal()
-				_ = conn.WriteMessage(websocket.TextMessage, payload)
-				_ = conn.Close()
+		switch purpose.Action {
+		case "attach":
+			ls := mgr.GetLocal(purpose.Session)
+			if ls == nil || ls.isClosed() {
+				// TOCTOU 兜底：ticket 签发后会话可能已关闭/过期。
+				wsClose(conn, "session not found or expired")
 				return
 			}
-			username = uname
+			info, ok := mgr.index.Get(purpose.Session)
+			if !ok || info.expired(mgr.clock()) {
+				wsClose(conn, "session not found or expired")
+				return
+			}
+			ac := &attachedConn{conn: conn}
+			if !mgr.Attach(ls, ac) {
+				return
+			}
+			ls.readLoop(ac)
+			mgr.Detach(ls, ac)
 
-			// 根据 ?mode= 决定本次会话进入 opencode / codex 还是 bash。
+		case "create":
+			username := purpose.Username
+			homeDir := purpose.HomeDir
+			mode := purpose.Mode
+
+			// 根据 ticket 内的 mode 决定本次会话进入 opencode / codex 还是 bash。
 			// 同步失败只 log、不阻塞登录（仍继续启动对应代理）。
-			mode := r.URL.Query().Get("mode")
 			var effCfg *auth.OpencodeConfig
 			var effCodexCfg *auth.CodexConfig
 			if opencodeCfg != nil && opencodeCfg.Enabled && mode == "opencode" {
@@ -85,48 +99,65 @@ func NewWs(authr *auth.Authenticator, opencodeCfg *auth.OpencodeConfig, codexCfg
 			sessionID := newSessionID()
 
 			// opencode / codex 模式：启动前补全配置引用的 api_key。
-			// 此时 WebSocket 已 Upgrade、hubSession 尚未创建（readLoop 未启动），
+			// 此时 WebSocket 已 Upgrade、会话尚未登记（readLoop 未启动），
 			// auth flow 直接读写 conn。缺失 key 时下发 auth-request 弹窗等待用户
 			// 输入，用户取消/超时则发送 close 消息并结束会话。
 			var authEnv map[string]string
 			var aerr error
 			if effCfg != nil {
 				authTimeout := defaultAuthTimeout
-				if opencodeCfg != nil && opencodeCfg.AuthTimeout > 0 {
+				if opencodeCfg.AuthTimeout > 0 {
 					authTimeout = time.Duration(opencodeCfg.AuthTimeout) * time.Second
 				}
 				authEnv, aerr = resolveAuthEnv(conn, username, homeDir, auth.RequiredEnvVars, authTimeout)
 			} else if effCodexCfg != nil {
 				authTimeout := defaultAuthTimeout
-				if codexCfg != nil && codexCfg.AuthTimeout > 0 {
+				if codexCfg.AuthTimeout > 0 {
 					authTimeout = time.Duration(codexCfg.AuthTimeout) * time.Second
 				}
 				authEnv, aerr = resolveAuthEnv(conn, username, homeDir, auth.RequiredCodexEnvVars, authTimeout)
 			}
 			if aerr != nil {
 				log.Printf("ws: auth env for %q failed: %v", username, aerr)
-				reason := "api key required but canceled or timed out"
-				payload, _ := protocol.CloseMessage(reason).Marshal()
-				_ = conn.WriteMessage(websocket.TextMessage, payload)
-				_ = conn.Close()
+				wsClose(conn, "api key required but canceled or timed out")
 				return
 			}
 
 			sess, serr := pty.NewSessionForUserMode(username, homeDir, effCfg, effCodexCfg, sandboxCfg, sessionID, authEnv)
 			if serr != nil {
 				log.Printf("pty session create failed: %v", serr)
-				payload, _ := protocol.CloseMessage("failed to start shell: " + serr.Error()).Marshal()
-				_ = conn.WriteMessage(websocket.TextMessage, payload)
-				_ = conn.Close()
+				wsClose(conn, "failed to start shell: "+serr.Error())
 				return
 			}
-			hs = hub.register(username, sess, sessionID)
-		}
 
-		// 4. 附着到会话：本协程读取客户端输入，pump goroutine 负责输出。
-		ac := &attachedConn{conn: conn}
-		hs.attach(ac)
-		hs.readLoop(ac)
-		hs.detach(ac)
+			ls, cerr := mgr.Create(CreateParams{
+				ID:        sessionID,
+				Username:  username,
+				Mode:      mode,
+				LongLived: purpose.Type == "long",
+				Hours:     purpose.Hours,
+				MaxLong:   cfg.MaxLongN,
+				MaxTotal:  cfg.MaxTotalN,
+			}, sess)
+			if cerr != nil {
+				reason := "failed to create session"
+				switch {
+				case errors.Is(cerr, ErrLongLimit):
+					reason = msgLongLimit
+				case errors.Is(cerr, ErrTotalLimit):
+					reason = msgTotalLimit
+				}
+				wsClose(conn, reason)
+				return
+			}
+
+			ac := &attachedConn{conn: conn}
+			mgr.Attach(ls, ac)
+			ls.readLoop(ac)
+			mgr.Detach(ls, ac)
+
+		default:
+			wsClose(conn, "invalid ticket action")
+		}
 	}
 }

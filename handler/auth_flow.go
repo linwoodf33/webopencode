@@ -31,7 +31,7 @@ var defaultAuthTimeout = time.Duration(auth.DefaultAuthTimeout) * time.Second
 // 安全约束：
 //   - 只接受 envVar 在 missing 列表内的响应（防客户端注入任意变量名/覆盖其它 key）；
 //   - api_key 仅通过 WebSocket 消息传输并写回文件，绝不进日志/命令行参数；
-//   - 调用方必须保证本流程在 hubSession 创建/readLoop 启动之前执行（直接读写 conn）。
+//   - 调用方必须保证本流程在 localSession 创建/readLoop 启动之前执行（直接读写 conn）。
 //
 // 用户取消返回 ErrAuthCanceled，等待超时返回 ErrAuthTimeout，其余错误原样返回。
 func collectAPIKeys(conn *websocket.Conn, username, homeDir string,

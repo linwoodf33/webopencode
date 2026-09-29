@@ -6,17 +6,30 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+
+	"webshell/pty"
 )
 
 // maxUploadBytes 单次上传文件大小上限（100MB）。
 const maxUploadBytes = 100 << 20
 
+// writeFileAsUser / checkWritableAsUser 是 pty 文件操作的测试接缝（seam）：
+// 生产实现直接转发到 *pty.Session；单测可替换为打桩，避免依赖真实 pty/sudo。
+var (
+	writeFileAsUser = func(s *pty.Session, filename string, data []byte) (string, error) {
+		return s.WriteFileAsUser(filename, data)
+	}
+	checkWritableAsUser = func(s *pty.Session) (string, error) {
+		return s.CheckWritableAsUser("")
+	}
+)
+
 // NewUploadHandler 处理 POST /api/upload（将文件上传到当前终端目录）。
 //
-// 通过 ?session=<id>&username=<user> 定位会话，取其实时工作目录（WorkingDirectory）
-// 作为上传目标，再以目标用户身份写入文件，确保文件归属该用户。权限不足时返回
-// 明确提示，引导用户先在终端中切换到有写权限的目录。
-func NewUploadHandler(hub *sessionHub) http.HandlerFunc {
+// 经 requireMgmt 认证后，通过 ?session=<id> 定位会话（并校验归属当前 mgmt 用户），
+// 取其实时工作目录（WorkingDirectory）作为上传目标，再以目标用户身份写入文件，
+// 确保文件归属该用户。权限不足时返回明确提示，引导用户先在终端中切换到有写权限的目录。
+func NewUploadHandler(mgr *SessionManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -24,9 +37,10 @@ func NewUploadHandler(hub *sessionHub) http.HandlerFunc {
 			return
 		}
 
-		hs := hub.get(r.URL.Query().Get("session"))
-		if hs == nil || hs.username != r.URL.Query().Get("username") || hs.isClosed() {
-			writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "session not found or expired"})
+		username := ctxUsername(r)
+		hs := mgr.GetLocal(r.URL.Query().Get("session"))
+		if hs == nil || hs.username != username || hs.isClosed() {
+			writeJSON(w, http.StatusNotFound, errorResponse{Error: "session not found or expired"})
 			return
 		}
 
@@ -59,7 +73,7 @@ func NewUploadHandler(hub *sessionHub) http.HandlerFunc {
 			return
 		}
 
-		dest, err := hs.sess.WriteFileAsUser(filename, data)
+		dest, err := writeFileAsUser(hs.proc, filename, data)
 		if err != nil {
 			log.Printf("upload failed: user=%s file=%s: %v", hs.username, filename, err)
 			msg := "上传失败：" + err.Error()
@@ -83,10 +97,10 @@ func isPermissionErr(err error) bool {
 
 // NewUploadCheckHandler 处理 GET /api/upload-check（上传前权限预检）。
 //
-// 通过 ?session=<id>&username=<user> 定位会话，取其实时工作目录，以目标用户身份
-// 检测该目录是否可写（临时文件写入+删除）。可写返回 200 {ok:true, path}；不可写
-// 返回 400 并附提示，前端据此在上传前就提醒用户切换目录，避免上传完成才报错。
-func NewUploadCheckHandler(hub *sessionHub) http.HandlerFunc {
+// 经 requireMgmt 认证后，通过 ?session=<id> 定位会话（并校验归属），取其实时工作
+// 目录，以目标用户身份检测该目录是否可写（临时文件写入+删除）。可写返回
+// 200 {ok:true, path}；不可写返回 400 并附提示，前端据此在上传前就提醒用户切换目录。
+func NewUploadCheckHandler(mgr *SessionManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -94,13 +108,14 @@ func NewUploadCheckHandler(hub *sessionHub) http.HandlerFunc {
 			return
 		}
 
-		hs := hub.get(r.URL.Query().Get("session"))
-		if hs == nil || hs.username != r.URL.Query().Get("username") || hs.isClosed() {
-			writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "session not found or expired"})
+		username := ctxUsername(r)
+		hs := mgr.GetLocal(r.URL.Query().Get("session"))
+		if hs == nil || hs.username != username || hs.isClosed() {
+			writeJSON(w, http.StatusNotFound, errorResponse{Error: "session not found or expired"})
 			return
 		}
 
-		dir, err := hs.sess.CheckWritableAsUser("")
+		dir, err := checkWritableAsUser(hs.proc)
 		if err != nil {
 			log.Printf("upload-check failed: user=%s: %v", hs.username, err)
 			msg := "无法写入当前目录（权限不足），请在终端中切换到有写权限的目录后重试"

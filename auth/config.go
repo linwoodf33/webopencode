@@ -231,8 +231,16 @@ type Config struct {
 	// Listen 服务监听地址与端口，格式 host:port（如 "0.0.0.0:8080" 或 ":8080"）。
 	// 为空时走默认 ":8080"。
 	Listen string `yaml:"listen"`
-	// TokenTTL 一次性 token 有效期（秒）。0 或负数走默认 5 分钟。
-	TokenTTL int `yaml:"token_ttl"`
+	// SessionTTLHours 新增长期会话的默认时长（小时）。0 或负数走默认 24。
+	SessionTTLHours float64 `yaml:"session_ttl_hours"`
+	// MaxSessionTTLHours 单次输入最大时长（小时，新建与延期共用）。0 或负数走默认 168。
+	MaxSessionTTLHours float64 `yaml:"max_session_ttl_hours"`
+	// MaxLongSessions 每用户长期会话数量上限。0 或负数走默认 3。
+	MaxLongSessions int `yaml:"max_long_sessions"`
+	// MaxTotalSessions 每用户会话总数上限（长+短）。0 或负数走默认 10。
+	MaxTotalSessions int `yaml:"max_total_sessions"`
+	// MgmtTTLHours mgmt_token 有效期（小时）。0 或负数走默认 8。
+	MgmtTTLHours float64 `yaml:"mgmt_ttl_hours"`
 	// Opencode 登录后直接进入 opencode TUI 的配置（enabled=false 退回 bash）。
 	Opencode OpencodeConfig `yaml:"opencode"`
 	// Codex 登录后直接进入 codex TUI 的配置（enabled=false 退回 bash）。
@@ -241,15 +249,34 @@ type Config struct {
 	Sandbox SandboxConfig `yaml:"sandbox"`
 	// ADTimeout AD 连接/操作超时（派生，不参与 yaml）。
 	ADTimeout time.Duration
-	// TokenTTLd token 有效期（派生，不参与 yaml）。
-	TokenTTLd time.Duration
+	// SessionTTLd 默认长期会话时长（派生，不参与 yaml）。
+	SessionTTLd time.Duration
+	// MaxAttachTTL 单次最大时长/增量（派生，不参与 yaml）。
+	MaxAttachTTL time.Duration
+	// MgmtTTLd mgmt_token 有效期（派生，不参与 yaml）。
+	MgmtTTLd time.Duration
+	// MaxLongN 长期会话数量上限（派生，不参与 yaml）。
+	MaxLongN int
+	// MaxTotalN 会话总数上限（派生，不参与 yaml）。
+	MaxTotalN int
 }
 
 // DefaultADTimeout 默认 AD 连接/操作超时（5 秒）。
 const DefaultADTimeout = 5 * time.Second
 
-// DefaultTokenTTL 默认一次性 token 有效期（5 分钟）。
-const DefaultTokenTTL = 5 * time.Minute
+// 会话/凭证相关默认值。
+const (
+	// DefaultSessionTTLHours 新增长期会话默认时长（小时）。
+	DefaultSessionTTLHours = 24
+	// DefaultMaxSessionTTLHours 单次最大时长（小时）。
+	DefaultMaxSessionTTLHours = 168
+	// DefaultMaxLongSessions 每用户长期会话数量上限。
+	DefaultMaxLongSessions = 3
+	// DefaultMaxTotalSessions 每用户会话总数上限（长+短）。
+	DefaultMaxTotalSessions = 10
+	// DefaultMgmtTTLHours mgmt_token 默认有效期（小时）。
+	DefaultMgmtTTLHours = 8
+)
 
 // DefaultListen 默认服务监听地址（":8080"，监听所有网卡的 8080 端口）。
 const DefaultListen = ":8080"
@@ -277,8 +304,17 @@ ad:
 # true：用户 DN + 密码 bind；false：仅目录查询
 require_password: true
 
-# 一次性 token 有效期（秒），0 或负数走默认 300
-token_ttl: 300
+# 会话与凭证配置（0 或负数走默认值）
+# session_ttl_hours: 新增长期会话的默认时长（小时），默认 24
+# max_session_ttl_hours: 单次输入最大时长（小时，新建与延期共用），默认 168
+# max_long_sessions: 每用户长期会话数量上限，默认 3
+# max_total_sessions: 每用户会话总数上限（长+短），默认 10
+# mgmt_ttl_hours: 管理 token（mgmt_token）有效期（小时），默认 8
+session_ttl_hours: 24
+max_session_ttl_hours: 168
+max_long_sessions: 3
+max_total_sessions: 10
+mgmt_ttl_hours: 8
 
 # opencode 模式：登录后是否直接进入 opencode TUI（而非 bash）
 # enabled: true 进入 opencode；false（缺省）退回 bash
@@ -362,7 +398,7 @@ sandbox:
 // LoadConfig 从指定的 config.yaml 文件加载配置。
 // 文件不存在时返回 os.ErrNotExist（可被 errors.Is 判定）。
 // fail-fast：server / manager_dn / manager_password / search_dn 任一为空均报错。
-// timeout / token_ttl 为 0 或负数时使用默认值（5 秒 / 5 分钟）。
+// timeout 为 0 或负数时使用默认值（5 秒）；会话/凭证配置同理走默认值。
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -395,11 +431,27 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	cfg.ADTimeout = timeout
 
-	ttl := time.Duration(cfg.TokenTTL) * time.Second
-	if cfg.TokenTTL <= 0 {
-		ttl = DefaultTokenTTL
+	// 会话/凭证配置：0 或负数走默认值，并派生 duration / 计数。
+	if cfg.SessionTTLHours <= 0 {
+		cfg.SessionTTLHours = DefaultSessionTTLHours
 	}
-	cfg.TokenTTLd = ttl
+	if cfg.MaxSessionTTLHours <= 0 {
+		cfg.MaxSessionTTLHours = DefaultMaxSessionTTLHours
+	}
+	if cfg.MaxLongSessions <= 0 {
+		cfg.MaxLongSessions = DefaultMaxLongSessions
+	}
+	if cfg.MaxTotalSessions <= 0 {
+		cfg.MaxTotalSessions = DefaultMaxTotalSessions
+	}
+	if cfg.MgmtTTLHours <= 0 {
+		cfg.MgmtTTLHours = DefaultMgmtTTLHours
+	}
+	cfg.SessionTTLd = time.Duration(cfg.SessionTTLHours * float64(time.Hour))
+	cfg.MaxAttachTTL = time.Duration(cfg.MaxSessionTTLHours * float64(time.Hour))
+	cfg.MgmtTTLd = time.Duration(cfg.MgmtTTLHours * float64(time.Hour))
+	cfg.MaxLongN = cfg.MaxLongSessions
+	cfg.MaxTotalN = cfg.MaxTotalSessions
 
 	// 监听地址：为空走默认 ":8080"。
 	if cfg.Listen == "" {

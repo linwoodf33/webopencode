@@ -25,8 +25,17 @@ ad:
 # false：退回目录查询模式（只查目录存在，不校验用户密码）
 require_password: true
 
-# 一次性 token 有效期（秒），0 或负数走默认 300
-token_ttl: 300
+# 会话与凭证配置（0 或负数走默认值）
+# session_ttl_hours: 新增长期会话的默认时长（小时），默认 24
+# max_session_ttl_hours: 单次输入最大时长（小时，新建与延期共用），默认 168
+# max_long_sessions: 每用户长期会话数量上限，默认 3
+# max_total_sessions: 每用户会话总数上限（长+短），默认 10
+# mgmt_ttl_hours: 管理 token（mgmt_token）有效期（小时），默认 8
+session_ttl_hours: 24
+max_session_ttl_hours: 168
+max_long_sessions: 3
+max_total_sessions: 10
+mgmt_ttl_hours: 8
 
 # opencode 模式：登录后是否直接进入 opencode TUI（而非 bash）
 # enabled: true 进入 opencode；false（缺省）退回 bash

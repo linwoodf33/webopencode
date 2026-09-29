@@ -326,6 +326,28 @@
     ws.send(JSON.stringify({ type: "resize", data: dims }));
   }
 
+  var ATTACH_RESIZE_JITTER_MS = 150;   // 抖动后还原的延时
+  var isAttachEntry = false;           // 本次是否为 re-attach 进入（create 不抖动）
+
+  // 发送一次带行数偏移的 resize（guard 语义同 sendResize）。
+  function sendResizeWithRows(rowOffset) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!term) return;
+    var rows = term.rows + rowOffset;
+    if (rows < 1) rows = term.rows + 1;   // 边界：rows==1 时减一无效，改 +1，保证 ≥1 且 ≠ 原值
+    ws.send(JSON.stringify({ type: "resize", data: { cols: term.cols, rows: rows } }));
+  }
+
+  // re-attach 专用：抖动（rows-1）→ 延时 → 还原真实尺寸，使前台 TUI 经历两次“净不同”变化而重绘。
+  function jitterResizeRedraw() {
+    if (!isAttachEntry) return;
+    sendResizeWithRows(-1);
+    setTimeout(function () {
+      if (ws && ws.readyState === WebSocket.OPEN) sendResize();  // 还原真实尺寸
+      isAttachEntry = false;                                     // 一次性
+    }, ATTACH_RESIZE_JITTER_MS);
+  }
+
   // 通过 WebSocket 向终端发送一次回车（\r），用于上传成功/取消后让终端
   // 回到 shell 交互提示符界面。
   function sendEnter() {
@@ -355,6 +377,7 @@
       if (!isCurrent()) return;
       term.writeln("\x1b[32m[connected]\x1b[0m");
       sendResize();
+      jitterResizeRedraw();   // 新增
     };
 
     myWs.onmessage = function (evt) {
@@ -754,6 +777,7 @@
   function enterTerminal(ticket, mode, sid) {
     currentMode = mode || "bash";
     currentSessionID = sid || null;
+    isAttachEntry = !!sid;   // re-attach（sid 非空）才抖动重绘；create 不抖动
     if (sid) {
       saveSession(sid, currentMode);
     } else {

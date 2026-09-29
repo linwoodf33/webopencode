@@ -50,17 +50,17 @@ func newWSServerConn(t *testing.T) *websocket.Conn {
 	}
 }
 
-// TestAttachForceResizeNilProc 校验 forceResize=true 且 proc 为 nil 时 Attach
-// 不 panic（nil-proc 守卫生效），并正常附着返回 true。
-func TestAttachForceResizeNilProc(t *testing.T) {
+// TestAttachNilProc 校验 proc 为 nil 时 Attach 不 panic（nil-proc 守卫生效），
+// 并正常附着返回 true。
+func TestAttachNilProc(t *testing.T) {
 	clk := &testClock{t: time.Unix(1_700_000_000, 0)}
 	mgr, ix := newTestManager(clk)
 	// addLocalSession 不设置 proc，故 proc == nil。
 	ls := addLocalSession(mgr, "s1", "alice", "bash", false, clk.now().Add(time.Hour), false)
 
 	ac := &attachedConn{conn: newWSServerConn(t)}
-	if !mgr.Attach(ls, ac, true) {
-		t.Fatal("Attach(forceResize=true, proc=nil) should succeed")
+	if !mgr.Attach(ls, ac) {
+		t.Fatal("Attach(proc=nil) should succeed")
 	}
 	if info, ok := ix.Get("s1"); !ok || !info.Attached {
 		t.Errorf("session should be marked attached, got %+v ok=%v", info, ok)

@@ -577,22 +577,6 @@ func (s *Session) Write(p []byte) (int, error) {
 	return s.master.Write(p)
 }
 
-// ptyGetsize / ptySetsize 是 pty 尺寸读写的包内可替换接缝（默认指向 creack/pty），
-// 供 ForceResizeCurrent 单测注入纯函数，无需真实 pty 即可覆盖各分支。
-var (
-	ptyGetsize = pty.Getsize
-	ptySetsize = pty.Setsize
-)
-
-// forceResizeStepDelay 是 ForceResizeCurrent 相邻两次 winsize 变更之间的间隔。
-// 目的：避免标准信号 SIGWINCH 被内核合并，使 bash 能分别处理「抖动尺寸」与
-// 「还原尺寸」两次变更，从而真正重绘提示符（见 ForceResizeCurrent 注释）。
-// 取值经端到端实测（80ms 可使 bash 在两次变更间完成 SIGWINCH 处理并重绘）。
-//
-// 声明为包内变量而非常量：便于环境/负载变化时无需改码即可调整（仍保持默认
-// 80ms）。仅包内使用，不引入导出 API；测试可临时改写以缩短用例耗时。
-var forceResizeStepDelay = 80 * time.Millisecond
-
 // Resize 调整 pty 终端尺寸。cols/rows 必须为正整数。
 func (s *Session) Resize(cols, rows uint16) error {
 	s.mu.Lock()
@@ -606,99 +590,6 @@ func (s *Session) Resize(cols, rows uint16) error {
 	return pty.Setsize(s.master, &pty.Winsize{
 		Cols: cols,
 		Rows: rows,
-	})
-}
-
-// ForceResizeCurrent 强制触发一次 tty SIGWINCH（供 re-attach 后让前台应用重绘），
-// 不依赖目标尺寸参数。核心要求：保证 ioctl 序列中存在**两次非零→非零**的尺寸变更。
-//
-// 背景（已由实验确证）：本沙箱（userns+pidns+独立 devpts）下，slave winsize 从
-// (0,0) 到非零的**首次**变更不投递 SIGWINCH（ioctl rc=0，尺寸「存住」但无信号）；
-// 而 0→(80,24) 落定后，再做非零→非零变更可正常触发 SIGWINCH（bash 收到
-// SI_KERNEL + write 重绘）。因此原先「(0,0) 时只 Setsize 一次」的实现对
-// re-attach 场景无效。
-//
-// 序列（均持 s.mu，closed/master 守卫与 os.ErrClosed 语义同 Resize）：
-//  1. ptyGetsize(master) 读当前 (rows, cols)；
-//  2. 基准归一：cols<=0 || rows<=0 → (80,24)；
-//  3. ptySetsize(cols, rows)：先把非零基准落定（0×0→非零「存住」；非零时为
-//     幂等、无信号，无害）；
-//  4. 派生一个不同的合法尺寸 (c2,r2)：两维各自优先减一（保证 ≥1）；某维为 1
-//     时保持该维；若两维都为 1（无维度可减）则递增 rows，确保
-//     (c2,r2) != (cols,rows)；
-//  5. ptySetsize(c2, r2)（非零→非零，发 SIGWINCH #1）；
-//  6. ptySetsize(cols, rows)（非零→非零，发 SIGWINCH #2）。
-//
-// 步间延时（forceResizeStepDelay）：实测（本沙箱 strace/端到端）若两次变更
-// 紧邻发出，SIGWINCH 作为标准信号会**合并**——bash 的处理器只运行一次、读到
-// 最终尺寸（与它缓存的一致，且 bash 把 0×0 缓存为默认 80x24），判定「尺寸无
-// 变化」从而**不重绘**，re-attach 仍然空白。在两处变更之间各插入一个小延时，
-// 使中间尺寸先被 bash 处理（缓存更新并重绘），随后还原再触发一次，才能稳定
-// 产生 output。延时仅在 re-attach 时发生（160ms 量级），可接受。
-//
-// 设计代价与调用面（务必知悉）：
-//   - 本函数在持 s.mu 期间共 sleep 约 160ms（2×forceResizeStepDelay），期间阻塞
-//     同会话的 Write/Resize/Read/Close；仅在 re-attach（Attach(forceResize=true)）
-//     时调用，此时 readLoop 尚未启动，实际竞争面窄、无死锁。
-//   - forceResizeStepDelay 的由来：SIGWINCH 为标准信号会被合并；若两次尺寸变更
-//     紧邻发出，bash 只处理一次、读到最终尺寸与其缓存一致 → 判定无变化 → 不重绘。
-//     故需让中间尺寸先被 bash 消费。80ms 为端到端实测稳定值。
-//   - 0×0 特殊性：本沙箱/内核下 slave winsize 从 (0,0) 到非零的首次变更不投递
-//     SIGWINCH，故需先落定非零基准再做非零→非零抖动。
-//   - 残余风险：极端负载下 80ms 可能不足（偶发仍空白，用户按回车可兜底）。
-//
-// 任一步 ioctl 失败以 error 返回（non-fatal，调用方 log）。
-func (s *Session) ForceResizeCurrent() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed || s.master == nil {
-		return os.ErrClosed
-	}
-	rows, cols, err := ptyGetsize(s.master)
-	if err != nil {
-		return err
-	}
-	// 基准归一：从未 resize（(0,0)）或非法尺寸统一到默认 80x24。
-	if cols <= 0 || rows <= 0 {
-		cols, rows = 80, 24
-	}
-	// 步骤 1：先把基准尺寸落定。0×0→非零的首次变更会「存住」尺寸（本沙箱下
-	// 不投递 SIGWINCH）；非零→同样尺寸为幂等，无信号亦无害。
-	if err := ptySetsize(s.master, &pty.Winsize{
-		Cols: uint16(cols),
-		Rows: uint16(rows),
-	}); err != nil {
-		return err
-	}
-	// 步骤 2：派生一个不同的合法尺寸（两维均 >=1）。两维各自优先减一；某维为
-	// 1 时保持该维不变（仅靠另一维变化）；若两维都为 1（无维度可减）则递增
-	// rows，保证 (c2,r2) != (cols,rows) 且不出现 0。
-	// 先让 bash 处理基准落定这一次变更（若产生了信号），再发出抖动，避免合并。
-	time.Sleep(forceResizeStepDelay)
-	c2, r2 := cols, rows
-	if cols > 1 {
-		c2 = cols - 1
-	}
-	if rows > 1 {
-		r2 = rows - 1
-	}
-	if c2 == cols && r2 == rows {
-		// cols==1 && rows==1：唯一无法靠减一产生差异的边界，递增 rows。
-		r2 = rows + 1
-	}
-	// 步骤 3：非零→非零抖动（发 SIGWINCH #1）。
-	if err := ptySetsize(s.master, &pty.Winsize{
-		Cols: uint16(c2),
-		Rows: uint16(r2),
-	}); err != nil {
-		return err
-	}
-	// 步骤 4：非零→非零还原（发 SIGWINCH #2）。
-	// 间隔一次，确保 bash 先处理抖动尺寸（缓存更新并重绘）后再还原。
-	time.Sleep(forceResizeStepDelay)
-	return ptySetsize(s.master, &pty.Winsize{
-		Cols: uint16(cols),
-		Rows: uint16(rows),
 	})
 }
 

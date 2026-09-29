@@ -244,15 +244,13 @@ func (m *SessionManager) Create(p CreateParams, proc *pty.Session) (*localSessio
 }
 
 // Attach 将连接附着到会话：sMu 内 swap conn、取 pending → 释放 → 锁外踢旧连接
-// → 冲刷 pending → [可选] 强制一次 SIGWINCH → 发 SessionMessage。
-// 索引仅更新 attached 状态（不改 TTL）。
+// → 冲刷 pending → 发 SessionMessage。索引仅更新 attached 状态（不改 TTL）。
 //
-// forceResize 为 true（re-attach 场景）时，在释放 sMu 之后、发 SessionMessage
-// 之前调用 proc.ForceResizeCurrent()，强制前台应用（bash/readline/TUI）重绘提示符，
-// 修复 re-attach 后终端空白需按回车才有输出的问题。ioctl 失败仅 log、不影响附着。
+// re-attach 后的前台应用重绘由前端负责：前端在 attach 完成后做一次 resize 抖动
+// （rows-1 → 延时 → 真实尺寸），复用 resize→SIGWINCH 通路，兼容 bash/opencode 等 TUI。
 // R4 合规：绝不持 sMu/indexMu/mgrMu 做 pty ioctl。
 // 返回 false 表示会话已关闭（已向新连接发送 close 并关闭）。
-func (m *SessionManager) Attach(ls *localSession, ac *attachedConn, forceResize bool) bool {
+func (m *SessionManager) Attach(ls *localSession, ac *attachedConn) bool {
 	ls.mu.Lock()
 	if ls.closed {
 		ls.mu.Unlock()
@@ -289,14 +287,6 @@ func (m *SessionManager) Attach(ls *localSession, ac *attachedConn, forceResize 
 	// 注意：本函数在释放 sMu 后执行（R4：不得持锁做网络写）。
 	if len(pending) > 0 {
 		ls.writeTo(ac, pending)
-	}
-
-	// re-attach 时强制触发一次 SIGWINCH，促使前台应用重绘提示符。
-	// 此时已释放 sMu（R4：不得持锁做 pty ioctl）；失败仅 log、不影响附着。
-	if forceResize && ls.proc != nil {
-		if err := ls.proc.ForceResizeCurrent(); err != nil {
-			log.Printf("attach: force resize %s failed (non-fatal): %v", ls.id, err)
-		}
 	}
 
 	// 通知客户端本次会话标识。

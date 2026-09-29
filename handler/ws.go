@@ -82,7 +82,7 @@ func NewWs(mgr *SessionManager, tickets *auth.TicketStore, cfg *auth.Config) htt
 				return
 			}
 			ac := &attachedConn{conn: conn}
-			if !mgr.Attach(ls, ac, true) {
+			if !mgr.Attach(ls, ac) {
 				return
 			}
 			ls.readLoop(ac)
@@ -166,7 +166,7 @@ func NewWs(mgr *SessionManager, tickets *auth.TicketStore, cfg *auth.Config) htt
 			}
 
 			ac := &attachedConn{conn: conn}
-			mgr.Attach(ls, ac, false)
+			mgr.Attach(ls, ac)
 			ls.readLoop(ac)
 			mgr.Detach(ls, ac)
 

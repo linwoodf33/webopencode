@@ -187,34 +187,33 @@ type SessionIndex interface {
 
 **短期过期判定**：未 attached 且超过 `expireAt` 才过期，以索引中的 `Attached` 状态为准。`expired()` 语义：长期 `now >= expireAt`（无论是否 attached）；短期 `!Attached && now >= expireAt`。
 
-### 5.4 re-attach 强制重绘（ForceResizeCurrent）
+### 5.4 re-attach 后重绘（前端 resize 抖动）
 
 **目的**：re-attach（重新 attach 一个已 detach 的空闲会话）时，前端是全新的 xterm，
 不持有历史回放缓冲，若后台应用不主动重绘则显示空白。需让前台应用（bash/readline、
 opencode/codex TUI）主动重绘一次。
 
-**机制**：`Attach(forceResize=true)` → 锁外调用 `pty.ForceResizeCurrent()` → 对 pty
-master 做「落定非零基准 → 差一 → 还原」的 `TIOCSWINSZ` 序列 → 内核向前台 pgrp
-投递 `SIGWINCH` → 应用重绘 → pump → 前端 output。
+**机制**：后端**不再做尺寸回写**（原 `ForceResizeCurrent` 已移除）。改由前端在
+attach 完成后做一次 resize 抖动：`rows-1 → 150ms → 真实 rows`，即复用既有
+`resize` 消息通路，由内核向前台 pgrp 投递两次净不同的 `SIGWINCH`，促使 TUI
+重绘。create 路径不抖动（`isAttachEntry` 仅在 re-attach 且 `sid` 非空时为 true）。
 
-**三条经验（关键，勿删）**：
+**前端实现（`static/app.js`）**：
 
-1. **SIGWINCH 合并**：SIGWINCH 是标准信号，会被内核合并。两次尺寸变更紧邻发出时，
-   bash 的处理器只运行一次、读到最终尺寸，与其缓存一致 → 判定「尺寸无变化」→ 不重绘。
-   故需以 `forceResizeStepDelay`（默认 80ms）间隔，让中间尺寸先被 bash 消费（缓存更新
-   并重绘），还原时再触发一次，才能稳定产生 output。
-2. **(0,0) 首次变更不投递**：本环境（沙箱 userns/pidns/独立 devpts）下，slave winsize
-   从 (0,0)→非零的**首次**变更不产生 SIGWINCH（ioctl rc=0，尺寸「存住」但无信号）。
-   故必须先把非零基准落定，再做非零→非零抖动，否则 re-attach 仍空白。
-3. **代价与残余风险**：持 `pty.Session.mu` 期间 sleep ≤160ms（2×80ms），阻塞同会话的
-   Write/Resize/Read/Close；仅 re-attach 触发（此时 readLoop 尚未启动，竞争面窄、无
-   死锁）。极端负载下 80ms 可能不足（偶发仍空白，用户按回车可兜底）。
+- `sendResizeWithRows(rowOffset)`：发送带行数偏移的 resize；`rows < 1` 时改为
+  `rows + 1`，保证 ≥1 且与原值不同（复用 `sendResize` 的连接/终端守卫语义）。
+- `jitterResizeRedraw()`：仅在 `isAttachEntry` 时执行一次——先发 `rows-1`，
+  `ATTACH_RESIZE_JITTER_MS`（150ms）后还原真实尺寸并复位 `isAttachEntry`。
+- `connect` 的 `onopen` 在 `sendResize()` 之后调用 `jitterResizeRedraw()`。
 
-**曾评估的替代方案**：`TIOCSIG`（5.15 内核未实现）；`TIOCGPGRP` + `kill`（服务以 ease
-运行，跨用户 kill 前台 pgrp 的权限不确定）——均未采用。
+**为何改为前端**：后端 `ForceResizeCurrent` 依赖对 pty master 做
+「非零基准 → 差一 → 还原」的 `TIOCSWINSZ` 序列，对 bash 有效；但 opencode（Bun
+TUI）在该序列下**净尺寸变化为 0**（抖动→还原被合并/缓存），不触发重绘。已实测
+**前端真实 resize（`sendResize`）能让 opencode TUI 立即重绘**，且该通路对
+bash/codex 同样生效（统一走 resize→SIGWINCH），故收敛到前端一次抖动。
 
-`forceResizeStepDelay` 声明为包内变量（默认 `80 * time.Millisecond`），便于环境/负载
-变化时无需改码调整，不导出。
+**曾评估的后端方案**：`TIOCSIG`（5.15 内核未实现）；`TIOCGPGRP` + `kill`（服务
+以 ease 运行，跨用户 kill 前台 pgrp 的权限不确定）——均未采用。
 
 ---
 

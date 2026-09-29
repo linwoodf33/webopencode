@@ -79,6 +79,8 @@
   var fitAddon = null;
   var ws = null;
   var closed = false;
+  // 防重入：进入终端的三个入口共用，ticket 请求期间置位，回调后复位。
+  var entering = false;
 
   // window.resize 监听只注册一次（模块级 flag），避免多次进出终端时重复累积。
   var resizeListenerAdded = false;
@@ -334,17 +336,29 @@
   // 建立 WebSocket 连接：仅携带一次性 ticket（60s）。
   // 新建与接入均先经 /api/session/ticket 换取 ticket，再走本函数。
   function connect(ticket) {
+    // 关闭上一条连接：旧连接的回调会因代次守卫而全部失效。
+    if (ws) {
+      try { ws.close(); } catch (e) {}
+    }
     closed = false;
     var proto = location.protocol === "https:" ? "wss://" : "ws://";
     var url = proto + location.host + "/ws?ticket=" + encodeURIComponent(ticket);
-    ws = new WebSocket(url);
+    // 捕获本条连接引用，并以此判定回调是否仍属于「当前」连接。
+    var myWs = new WebSocket(url);
+    ws = myWs;
 
-    ws.onopen = function () {
+    function isCurrent() {
+      return ws === myWs;
+    }
+
+    myWs.onopen = function () {
+      if (!isCurrent()) return;
       term.writeln("\x1b[32m[connected]\x1b[0m");
       sendResize();
     };
 
-    ws.onmessage = function (evt) {
+    myWs.onmessage = function (evt) {
+      if (!isCurrent()) return;
       var msg;
       try {
         msg = JSON.parse(evt.data);
@@ -377,6 +391,26 @@
         showAuthModal(msg.data);
       } else if (msg.type === "close") {
         var reason = (msg.data && msg.data.reason) || "unknown";
+        if (reason === "replaced by new connection") {
+          // 接管语义：本连接已被新连接替换，静默收尾，不当作「会话结束」。
+          closed = true;
+          if (ws) {
+            try { ws.close(); } catch (e) {}
+            ws = null;
+          }
+          if (term) {
+            try { term.dispose(); } catch (e) {}
+            term = null;
+          }
+          clearSession();
+          if (mgmtToken) {
+            showSessionPanel(false);
+          } else {
+            showLogin("会话已在其他窗口打开");
+          }
+          return;
+        }
+        // 真实结束（shell exited / expired / closed / not available / startup 失败等）。
         term.writeln("\r\n\x1b[31m[closed: " + reason + "]\x1b[0m");
         closed = true;
         if (ws) {
@@ -398,11 +432,14 @@
       }
     };
 
-    ws.onerror = function () {
+    myWs.onerror = function () {
+      if (!isCurrent()) return;
       if (term) term.writeln("\r\n\x1b[31m[websocket error]\x1b[0m");
     };
 
-    ws.onclose = function () {
+    myWs.onclose = function () {
+      if (!isCurrent()) return;
+      ws = null;
       if (!closed && term) {
         term.writeln("\r\n\x1b[31m[connection lost]\x1b[0m");
       }
@@ -965,28 +1002,36 @@
       .then(function (r) {
         if (r.status === 401) {
           handleAuthExpired();
+          cb(null);
           return;
         }
         if (r.ok && r.data && r.data.ticket) {
           cb(r.data.ticket);
         } else {
           showModal((r.data && r.data.error) || ("获取访问凭证失败（HTTP " + r.status + "）"));
+          cb(null);
         }
       })
       .catch(function () {
         showModal("网络错误，无法获取访问凭证");
+        cb(null);
       });
   }
 
   // 接入已有会话。
   function attachSession(sid, mode) {
+    if (entering) return;
+    entering = true;
     requestTicket({ action: "attach", session: sid }, function (ticket) {
-      enterTerminal(ticket, mode || "bash", sid);
+      entering = false;
+      if (ticket) enterTerminal(ticket, mode || "bash", sid);
     });
   }
 
   // 新建会话：type 为 "long" 或 ""（临时）。
   function createSession(mode) {
+    if (entering) return;
+    entering = true;
     var isLong = newTypeLong.checked && !newTypeLong.disabled;
     var body = { action: "create", mode: mode, type: isLong ? "long" : "" };
     if (isLong) {
@@ -994,13 +1039,15 @@
       if (isNaN(hours) || hours < 1 || hours > cfg.maxSessionTtlHours) {
         newError.textContent =
           "时长需在 1 - " + cfg.maxSessionTtlHours + " 小时之间";
+        entering = false;
         return;
       }
       body.hours = hours;
     }
     newError.textContent = "";
     requestTicket(body, function (ticket) {
-      enterTerminal(ticket, mode, null);
+      entering = false;
+      if (ticket) enterTerminal(ticket, mode, null);
     });
   }
 
@@ -1184,9 +1231,12 @@
 
   // 登录入口：无会话且仅 bash 时，直接新建一个临时 bash 会话进入终端。
   function quickBashIfNoSessions() {
+    if (entering) return;
+    entering = true;
     // 当前产品行为：无会话时保持「直接进入 bash」的轻量路径。
     requestTicket({ action: "create", mode: "bash", type: "" }, function (ticket) {
-      enterTerminal(ticket, "bash", null);
+      entering = false;
+      if (ticket) enterTerminal(ticket, "bash", null);
     });
   }
 

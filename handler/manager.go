@@ -149,6 +149,9 @@ type SessionManager struct {
 	mu    sync.Mutex
 	local map[string]*localSession
 	now   func() time.Time
+	// closeProc 是 pty.Session.Close 的调用接缝：生产为直接 Close；单测可替换为
+	// 阻塞桩，用以验证「索引先移除、proc.Close 后执行」的时序（close 步骤 ③/⑤）。
+	closeProc func(*pty.Session)
 }
 
 // NewManager 创建一个会话管理器，并与索引互相接线（索引 reaper 到期回调 Close）。
@@ -160,6 +163,9 @@ func NewManager(index *memoryIndex, now func() time.Time) *SessionManager {
 		index: index,
 		local: make(map[string]*localSession),
 		now:   now,
+		closeProc: func(s *pty.Session) {
+			s.Close()
+		},
 	}
 	if index != nil {
 		index.setCloseFunc(func(id string) { m.close(id, "session expired") })
@@ -319,10 +325,17 @@ func (m *SessionManager) Detach(ls *localSession, ac *attachedConn) {
 // Close 终结一个会话（幂等）。六步且同序：
 //  1. mgrMu 取 ls（nil 即 return）；
 //  2. sMu 内判 closed（已 closed 则 return）并置 closed=true、摘 conn，立即释放 sMu；
-//  3. 锁外通知旧 conn（close 消息 + Close）；
-//  4. 锁外 proc.Close()；
-//  5. 再取 indexMu 做 Remove；
+//  3. 移除索引 index.Remove（纯内存、幂等，单独取/放 indexMu；此时 sMu 已释放，
+//     符合 indexMu → mgrMu → sMu 锁层级）；
+//  4. 锁外通知旧 conn（close 消息 + Close）；
+//  5. 锁外 proc.Close()（保持同步、不异步化）；
 //  6. mgrMu delete(local, id)。
+//
+// 步骤 ③ 必须排在 ④/⑤ 之前：④ 的网络写与 ⑤ 的 proc.Close（含 cmd.Wait，可能
+// 长时间阻塞，如 opencode TUI 回收）期间，若索引尚未移除，GET /api/sessions 仍
+// 会列出该会话且 active=true（见 sessionInfoDTO.Active=info.Attached），而 attach
+// ticket 仍签发、WS attach 却因 ls.closed 必然报 "session not found or expired"，
+// 形成状态一致性窗口。提前移除索引即消除该窗口。
 //
 // 绝不持锁做网络写或 pty.Close。
 func (m *SessionManager) Close(id string) bool { return m.close(id, "session closed") }
@@ -349,7 +362,10 @@ func (m *SessionManager) close(id, reason string) bool {
 
 	log.Printf("session %s closing: %s", id, reason)
 
-	// ③
+	// ③ 提前移除索引（纯内存、幂等；仅 indexMu，sMu 已释放）。
+	m.index.Remove(id)
+
+	// ④ 锁外通知旧 conn。
 	if ac != nil {
 		payload, _ := protocol.CloseMessage(reason).Marshal()
 		ac.writeMu.Lock()
@@ -358,13 +374,10 @@ func (m *SessionManager) close(id, reason string) bool {
 		ac.writeMu.Unlock()
 	}
 
-	// ④
-	if ls.proc != nil {
-		ls.proc.Close()
+	// ⑤ 锁外 proc.Close()（若 proc != nil；同步执行、不异步化）。
+	if ls.proc != nil && m.closeProc != nil {
+		m.closeProc(ls.proc)
 	}
-
-	// ⑤
-	m.index.Remove(id)
 
 	// ⑥
 	m.mu.Lock()

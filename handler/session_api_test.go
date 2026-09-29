@@ -220,6 +220,14 @@ func TestTicketAttach(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expired = %d, want 404", rec.Code)
 	}
+
+	// 本地已 closed（关闭窗口期内索引可能尚在）→ 404（纵深防御，不签发必然失败的 ticket）。
+	addLocalSession(mgr, "s3", "alice", "bash", false, base.Add(time.Hour), true)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, bodyRequest(requestAs(http.MethodPost, "/api/session/ticket", "alice"), `{"action":"attach","session":"s3"}`))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("closed local = %d, want 404", rec.Code)
+	}
 }
 
 func TestExtendHandler(t *testing.T) {

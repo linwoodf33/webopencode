@@ -180,6 +180,14 @@ func NewTicketHandler(mgr *SessionManager, tickets *auth.TicketStore, cfg *auth.
 				writeJSON(w, http.StatusNotFound, errorResponse{Error: "session not found or expired"})
 				return
 			}
+			// 纵深防御：索引命中后复核本地会话存在且未 closed。关闭窗口期内
+			// （索引已/即将移除、proc.Close 尚未返回）或索引与本地不一致时，避免
+			// 签发一个 attach 必然失败的 ticket（WS attach 会因 ls.closed 报错）。
+			// 保持与上面一致的 404 防枚举语义。
+			if ls := mgr.GetLocal(sid); ls == nil || ls.isClosed() {
+				writeJSON(w, http.StatusNotFound, errorResponse{Error: "session not found or expired"})
+				return
+			}
 			tok, err := tickets.Issue(auth.TicketPurpose{
 				Action:   "attach",
 				Username: username,

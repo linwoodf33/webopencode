@@ -185,6 +185,63 @@ func TestManagerCloseConcurrent(t *testing.T) {
 	}
 }
 
+// TestManagerCloseRemovesIndexBeforeProcClose 回归：close 的索引移除必须先于
+// proc.Close（其含 cmd.Wait，可能长时间阻塞）。用阻塞桩替代 proc.Close，断言在
+// 桩尚未返回时 index.Get 已 !ok——即状态一致性窗口不随 proc.Close 耗时增长。
+func TestManagerCloseRemovesIndexBeforeProcClose(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	clk := &testClock{t: base}
+	mgr, ix := newTestManager(clk)
+
+	ls := addLocalSession(mgr, "s1", "alice", "bash", false, base.Add(time.Hour), false)
+	// 非 nil 的 proc（零值即可）；其 Close 由桩接管，不会真正触碰 pty。
+	ls.proc = &pty.Session{}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	orig := mgr.closeProc
+	mgr.closeProc = func(p *pty.Session) {
+		if p != ls.proc {
+			orig(p)
+			return
+		}
+		close(entered)
+		<-release
+	}
+	t.Cleanup(func() { mgr.closeProc = orig })
+
+	done := make(chan struct{})
+	go func() {
+		mgr.Close("s1")
+		close(done)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("closeProc was not invoked")
+	}
+
+	// proc.Close 仍在阻塞，但索引必须已经移除。
+	if _, ok := ix.Get("s1"); ok {
+		t.Error("index must not contain s1 while proc.Close is still in progress")
+	}
+	// 本地会话已标记 closed（GetLocal 不再返回可 attach 的会话）。
+	if l := mgr.GetLocal("s1"); l == nil || !l.isClosed() {
+		t.Error("local session should be marked closed during proc.Close")
+	}
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return after proc.Close released")
+	}
+	if mgr.GetLocal("s1") != nil {
+		t.Error("local map should not contain s1 after Close returns")
+	}
+}
+
 func TestManagerReaperClosesExpired(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0)
 	clk := &testClock{t: base}

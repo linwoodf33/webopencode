@@ -182,7 +182,9 @@ type SessionIndex interface {
 
 - **R1（联合持锁序）**：需同时持多锁时，固定顺序为 `indexMu → mgrMu → sMu`，禁止逆序。
 - **R2（索引锁内不回调）**：持有 `indexMu` 时绝不回调会话/pty（不得获取 `mgrMu`/`sMu`，不得调用 manager/localSession 方法）。
-- **R3（统一六步 Close）**：一切会话终结统一走 `manager.Close`（幂等），六步同序——① `mgrMu` 取 ls；② `sMu` 内判 `closed` 并置位、摘 conn 后立即释放；③ 锁外通知旧 conn（close 消息 + Close）；④ 锁外 `proc.Close()`；⑤ 再取 `indexMu` 做 Remove；⑥ `mgrMu` delete。绝不持锁做网络写或 `pty.Close`。
+- **R3（统一六步 Close）**：一切会话终结统一走 `manager.Close`（幂等），六步同序——① `mgrMu` 取 ls；② `sMu` 内判 `closed` 并置位、摘 conn 后立即释放；③ 移除索引 `index.Remove`（纯内存、幂等，单独取 `indexMu`；此时 `sMu` 已释放）；④ 锁外通知旧 conn（close 消息 + Close）；⑤ 锁外 `proc.Close()`；⑥ `mgrMu` delete。绝不持锁做网络写或 `pty.Close`。
+
+  > ③ 必须早于 ④/⑤：④ 的网络写与 ⑤ 的 `proc.Close`（含 `cmd.Wait`，可能长时间阻塞，如 opencode TUI 回收）期间，若索引尚未移除，`GET /api/sessions` 仍会列出该会话且 `active=true`（`Active=info.Attached`），此时 attach ticket 仍签发、WS attach 却因 `ls.closed` 必然报 `session not found or expired`，形成状态一致性窗口。提前移除索引即消除该窗口。`POST /api/session/ticket`（attach）另在索引命中后复核本地 `ls` 存在且未 `closed`，作纵深防御。
 - **R4（reaper 快照）**：`ReapOnce` 在索引锁内仅取过期快照（id 列表），释放锁后再逐个调用 `closeFn`（即 `manager.Close`）；`runReaper` 按 `reaperInterval`（默认 30s）驱动。
 
 **短期过期判定**：未 attached 且超过 `expireAt` 才过期，以索引中的 `Attached` 状态为准。`expired()` 语义：长期 `now >= expireAt`（无论是否 attached）；短期 `!Attached && now >= expireAt`。

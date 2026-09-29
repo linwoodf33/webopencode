@@ -250,8 +250,11 @@ type Config struct {
 	// ADTimeout AD 连接/操作超时（派生，不参与 yaml）。
 	ADTimeout time.Duration
 	// SessionTTLd 默认长期会话时长（派生，不参与 yaml）。
+	// TODO(P2): remove if unused by production —— 生产代码未消费，仅 config_test
+	// 断言；保留因 DESIGN_SESSIONS.md 仍将其列为 Config 结构成员。
 	SessionTTLd time.Duration
 	// MaxAttachTTL 单次最大时长/增量（派生，不参与 yaml）。
+	// TODO(P2): remove if unused by production —— 同上，生产代码未消费。
 	MaxAttachTTL time.Duration
 	// MgmtTTLd mgmt_token 有效期（派生，不参与 yaml）。
 	MgmtTTLd time.Duration

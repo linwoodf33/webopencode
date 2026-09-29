@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"os/user"
 	"strconv"
@@ -213,7 +214,8 @@ func NewTicketHandler(mgr *SessionManager, tickets *auth.TicketStore, cfg *auth.
 				if hours == 0 {
 					hours = cfg.SessionTTLHours
 				}
-				if hours < 1 || hours > cfg.MaxSessionTTLHours {
+				// hours 必须为整数（拒 2.5 等被 int() 截断的输入）且在范围内。
+				if hours < 1 || hours > cfg.MaxSessionTTLHours || hours != math.Floor(hours) {
 					writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid hours"})
 					return
 				}

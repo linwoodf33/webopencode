@@ -274,14 +274,15 @@ func (m *SessionManager) Attach(ls *localSession, ac *attachedConn) bool {
 		old.writeMu.Unlock()
 	}
 
-	// 冲刷分离期间积压的输出。
-	for len(pending) > 0 {
-		n := len(pending)
-		if n > 4096 {
-			n = 4096
-		}
-		ls.writeTo(ac, pending[:n])
-		pending = pending[n:]
+	// 冲刷分离期间积压的输出：整段一次性写入。
+	//
+	// 与 pump 的 sendOutput 复用同一 writeTo（同一把 ac.writeMu），单次调用即
+	// 单条 output 消息、单次写，避免先前 4096 分块写与 pump 并发写同一 conn 时
+	// 块间交错导致的终端字节流乱序 / ANSI 撕裂。pending 上限 pendingMaxBytes
+	// （1MB），单次大 Buffer 写在 writeMu 下原子完成；即便短暂阻塞也仅影响本连接。
+	// 注意：本函数在释放 sMu 后执行（R4：不得持锁做网络写）。
+	if len(pending) > 0 {
+		ls.writeTo(ac, pending)
 	}
 
 	// 通知客户端本次会话标识。
@@ -369,6 +370,10 @@ func (m *SessionManager) close(id, reason string) bool {
 }
 
 // newSessionID 生成一个高熵随机会话标识。
+//
+// crypto/rand 失败时退化为「时间字符串哈希」仅作兜底，无安全影响：sessionID
+// 不是接入凭证（接入一律凭 ticket），仅用于标识会话/命名 cgroup，故即使可预测
+// 也不构成安全缺口；正常路径始终为 32 字节密码学随机。
 func newSessionID() string {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {

@@ -440,3 +440,31 @@ MaxTotalN     int           // max_total_sessions
 8. 文档同步（可选）
 
 P2（会话守护进程 `sessiond`）单独立项，见 §6.3。
+
+---
+
+## 16. Vendor 文件校验记录（P1）
+
+对 `static/vendor/` 下三个内嵌前端依赖做来源校验：以官方 npm 发布物为基准重新下载并逐字节比对，确认**仓库文件仅去除了官方文件末行的 `sourceMappingURL` 注释，无任何内容篡改**。
+
+- npm 包：`@xterm/xterm@5.5.0`、`@xterm/addon-fit@0.10.0`（registry.npmjs.org）。
+- 算法：SHA-256。
+- 比对时间：2026-09-29。
+
+### 16.1 hash 对照表（三文件 × 两端）
+
+| 文件 | 来源 | SHA-256 |
+| --- | --- | --- |
+| `static/vendor/xterm.js` | 仓库当前 | `6236F1C9B770148D48C72F90404AB71DADB6CDD731BA7FF9225209FC005B08C4` |
+| `static/vendor/xterm.js` | 官方 `lib/xterm.js` | `1F991AC3B4B283EBF96E60AE23A00A52765DD3A2E46FA6FDDA9F1AAB032F7495` |
+| `static/vendor/xterm.css` | 仓库当前 | `BA8E6985669488981CCF40C0CEFE3ABA80722CB6C92DE7AD628B0BD717FAF2B6` |
+| `static/vendor/xterm.css` | 官方 `css/xterm.css` | `BA8E6985669488981CCF40C0CEFE3ABA80722CB6C92DE7AD628B0BD717FAF2B6` |
+| `static/vendor/addon-fit.js` | 仓库当前 | `03E86DC1BC6B5028071ACAF10060688C25860EE11DC3DE80091730A93413F441` |
+| `static/vendor/addon-fit.js` | 官方 `lib/addon-fit.js` | `BDAEFA370B1BFC42EE88D46FE6072400902A4D4B2D45CD93438DDA9B23C97089` |
+
+### 16.2 差异说明与结论
+
+- `xterm.js`：官方文件末尾含一行 `//# sourceMappingURL=xterm.js.map`，仓库版本已删除该行。将官方文件去掉该行后与仓库文件**逐字节相等**（289407 B）。
+- `addon-fit.js`：官方文件末尾含一行 `//# sourceMappingURL=addon-fit.js.map`，仓库版本已删除该行。去掉该行后与仓库文件**逐字节相等**（1459 B）。
+- `xterm.css`：官方文件本身不含 `sourceMappingURL` 注释，两端 hash **完全一致**（5559 B）。
+- **结论：三文件与官方发布物的唯一差异为 `sourceMappingURL` 行，无内容篡改。**

@@ -132,8 +132,8 @@ func TestTicketCreate(t *testing.T) {
 		t.Fatalf("default type = %+v, want short/bash/0", p3)
 	}
 
-	// hours 越界。
-	for _, bad := range []string{`{"action":"create","type":"long","hours":0.5}`, `{"action":"create","type":"long","hours":200}`} {
+	// hours 越界 / 非整数。
+	for _, bad := range []string{`{"action":"create","type":"long","hours":0.5}`, `{"action":"create","type":"long","hours":200}`, `{"action":"create","type":"long","hours":2.5}`} {
 		rec = httptest.NewRecorder()
 		h.ServeHTTP(rec, bodyRequest(requestAs(http.MethodPost, "/api/session/ticket", "alice"), bad))
 		if rec.Code != http.StatusBadRequest {

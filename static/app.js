@@ -80,6 +80,9 @@
   var ws = null;
   var closed = false;
 
+  // window.resize 监听只注册一次（模块级 flag），避免多次进出终端时重复累积。
+  var resizeListenerAdded = false;
+
   // 当前会话标识（用于页面刷新后恢复同一终端），以及管理凭证/用户名。
   var currentSessionID = null;
   var mgmtToken = null;
@@ -438,10 +441,15 @@
       sendResize();
     });
 
-    window.addEventListener("resize", function () {
-      if (fitAddon) fitAddon.fit();
-      sendResize();
-    });
+    // window.resize 处理器只注册一次：回调在触发时读取模块级 fitAddon，
+    // 因此始终作用于当前终端；避免每次 createTerminal 重复 addEventListener 累积。
+    if (!resizeListenerAdded) {
+      resizeListenerAdded = true;
+      window.addEventListener("resize", function () {
+        if (fitAddon) fitAddon.fit();
+        sendResize();
+      });
+    }
   }
 
   // 设置终端字号并持久化；调整后重新 fit 并同步终端尺寸。

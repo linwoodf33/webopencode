@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -15,8 +16,21 @@ import (
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		// 允许所有来源（演示用途）。
-		return true
+		// 同源或空 Origin 放行：
+		//   - 浏览器 WS 必带 Origin（页面 origin），仅当其 host:port 与请求 Host
+		//     一致时放行（忽略 scheme：http/https 与 ws/wss 同源映射）；
+		//   - 无 Origin 头（如 python 裸 socket / 内部测试客户端）放行，保证
+		//     101 握手与既有验证可用；
+		//   - 跨源且带 Origin（含 "null"）一律拒绝。
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		u, err := url.Parse(origin)
+		if err != nil || u.Host == "" {
+			return false
+		}
+		return u.Host == r.Host
 	},
 }
 

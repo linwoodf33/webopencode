@@ -285,6 +285,10 @@ func NewExtendHandler(mgr *SessionManager, cfg *auth.Config) http.HandlerFunc {
 		info, err := mgr.index.Extend(r.URL.Query().Get("session"), ctxUsername(r), hours)
 		switch err {
 		case nil:
+			// 审计时间线：extend（锁外）。
+			if ls := mgr.GetLocal(info.ID); ls != nil && ls.rec != nil {
+				ls.rec.Event("extend", map[string]any{"hours": hours, "expire_at": info.ExpireAt.Unix()})
+			}
 			writeJSON(w, http.StatusOK, map[string]any{"id": info.ID, "expire_at": info.ExpireAt.Unix()})
 		case ErrSessionNotFound:
 			writeJSON(w, http.StatusNotFound, errorResponse{Error: "session not found"})
@@ -308,6 +312,10 @@ func NewCloseHandler(mgr *SessionManager) http.HandlerFunc {
 		if !ok || info.Username != ctxUsername(r) {
 			writeJSON(w, http.StatusNotFound, errorResponse{Error: "session not found"})
 			return
+		}
+		// 审计时间线：close-req（须在 Close 之前记，Close 会终结 recorder）。
+		if ls := mgr.GetLocal(sid); ls != nil && ls.rec != nil {
+			ls.rec.Event("close-req", nil)
 		}
 		mgr.Close(sid)
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

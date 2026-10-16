@@ -3,7 +3,11 @@ package auth
 import (
 	"errors"
 	"fmt"
+	"log"
+	"math"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -218,6 +222,147 @@ const DefaultOpencodePath = "/opt/opencode/bin/opencode"
 // DefaultOpencodeSyncFrom 默认 opencode 共享配置源目录。
 const DefaultOpencodeSyncFrom = "/opt/opencode-config"
 
+// AuditConfig 审计录制配置（DESIGN_AUDIT §10）。
+//
+// Enabled / RecordInput / UserCanViewSelf 用 *bool 以区分「未设置」（缺省 true）
+// 与显式 false，与 OpencodeConfig.Overwrite 等既有约定一致。
+type AuditConfig struct {
+	// Enabled 是否启用录制（false 时埋点为空操作，零开销）；缺省 true。
+	Enabled *bool `yaml:"enabled"`
+	// Dir 录制根目录；空走默认 DefaultAuditDir。
+	Dir string `yaml:"dir"`
+	// RecordInput 是否录制输入事件（"i"）；缺省 true。
+	RecordInput *bool `yaml:"record_input"`
+	// PasswordInput ECHO 关闭时输入处理：mask（默认）|omit|plaintext。
+	PasswordInput string `yaml:"password_input"`
+	// PasswordMaskWhen 脱敏判据：echo_verify（默认，EVW 输入间边界窗口）|
+	// echo_verify_tui（EVW + alt-screen TUI 门）|echo_off_canonical（遗留）|echo_off（严格）。
+	PasswordMaskWhen string `yaml:"password_mask_when"`
+	// EchoVerifyHangMs EVW hang 兜底时长（毫秒）：pending 的观察窗口未被下一个
+	// 输入块/边界事件关闭时，超过此时长一律按 hang 策略兜底（默认掩码）。<=0 走默认 2000。
+	EchoVerifyHangMs int `yaml:"echo_verify_hang_ms"`
+	// EchoVerifyHangPolicy hang 兜底裁决策略：mask（默认）|reached_plain。
+	EchoVerifyHangPolicy string `yaml:"echo_verify_hang_policy"`
+	// EchoVerifyStrictBatch echo=on 且整块含换行时一律掩码（严格整块，默认 false）。
+	EchoVerifyStrictBatch bool `yaml:"echo_verify_strict_batch"`
+	// EchoVerifyLatencyMs 旧键（已废弃，兼容别名）：按 hang 兜底语义读取。
+	EchoVerifyLatencyMs int `yaml:"echo_verify_latency_ms"`
+	// EchoVerifyTUI 是否启用 alt-screen TUI 门（可被 echo_verify_tui 判据隐式开启）。
+	EchoVerifyTUI bool `yaml:"echo_verify_tui"`
+	// MaxSessionBytes 单会话 cast 上限（如 "100M"）；空走默认。
+	MaxSessionBytes string `yaml:"max_session_bytes"`
+	// MaxTotalBytes 总量配额（如 "20G"）；空走默认。
+	MaxTotalBytes string `yaml:"max_total_bytes"`
+	// RetentionDays 保留天数（按 ended_at 判定）。
+	// 用 *int 以区分「未设置」（缺省 90 天）与显式 0（不自动清理），
+	// 与 Enabled/RecordInput/UserCanViewSelf 的 *bool 约定一致。
+	RetentionDays *int `yaml:"retention_days"`
+	// CleanupInterval 清扫间隔（如 "1h"）；空走默认。
+	CleanupInterval string `yaml:"cleanup_interval"`
+	// FailClosed recorder 打开失败时是否拒绝建会话；默认 false（fail-open）。
+	FailClosed bool `yaml:"fail_closed"`
+	// TrustProxy 是否信任 X-Forwarded-For（防伪造，默认关闭）。
+	TrustProxy bool `yaml:"trust_proxy"`
+	// UserCanViewSelf 普通用户是否可回放本人录屏；缺省 true。
+	UserCanViewSelf *bool `yaml:"user_can_view_self"`
+	// Admins 审计员用户名白名单。
+	Admins []string `yaml:"admins"`
+}
+
+// EnabledValue 返回审计是否启用（缺省 true）。
+func (a *AuditConfig) EnabledValue() bool {
+	if a == nil || a.Enabled == nil {
+		return true
+	}
+	return *a.Enabled
+}
+
+// RecordInputEnabled 返回是否录制输入（缺省 true）。
+func (a *AuditConfig) RecordInputEnabled() bool {
+	if a == nil || a.RecordInput == nil {
+		return true
+	}
+	return *a.RecordInput
+}
+
+// UserCanViewSelfEnabled 返回普通用户是否可查看本人录屏（缺省 true）。
+func (a *AuditConfig) UserCanViewSelfEnabled() bool {
+	if a == nil || a.UserCanViewSelf == nil {
+		return true
+	}
+	return *a.UserCanViewSelf
+}
+
+// 审计默认值（DESIGN_AUDIT §10 / §15）。
+const (
+	// DefaultAuditDir 默认录制根目录。
+	DefaultAuditDir = "/var/log/webshell/audit"
+	// DefaultAuditMaxSessionBytes 单会话 cast 默认上限（100MB）。
+	DefaultAuditMaxSessionBytes int64 = 100 << 20
+	// DefaultAuditMaxTotalBytes 总量默认配额（20GB）。
+	DefaultAuditMaxTotalBytes int64 = 20 << 30
+	// DefaultAuditRetention 默认保留期（90 天）。
+	DefaultAuditRetention = 90 * 24 * time.Hour
+	// DefaultAuditCleanupInterval 默认清扫间隔（1h）。
+	DefaultAuditCleanupInterval = time.Hour
+	// DefaultAuditPasswordInput ECHO 关闭时默认输入处理策略。
+	DefaultAuditPasswordInput = "mask"
+	// DefaultAuditPasswordMaskWhen 默认脱敏判据（EVW 输入间边界窗口）。
+	DefaultAuditPasswordMaskWhen = "echo_verify"
+	// DefaultAuditEchoVerifyHangMs EVW hang 兜底默认时长（毫秒）。
+	DefaultAuditEchoVerifyHangMs = 2000
+	// DefaultAuditEchoVerifyHangPolicy hang 兜底默认策略（一律掩码）。
+	DefaultAuditEchoVerifyHangPolicy = "mask"
+)
+
+// parseSize 解析带单位的大小字符串（如 "100M"、"20G"、"1_000K"）为字节数。
+//
+// 支持 K/M/G/T（大小写不敏感，可带尾随 "B"，如 "100MB"），1024 进制；
+// 数字与单位间的下划线被忽略（如 "1_000M"）。空串返回 def；非法返回 error。
+func parseSize(s string, def int64) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def, nil
+	}
+	s = strings.ReplaceAll(s, "_", "")
+
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	numPart := s[:i]
+	if numPart == "" {
+		return 0, fmt.Errorf("missing number in size %q", s)
+	}
+	n, err := strconv.ParseInt(numPart, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid number in size %q: %w", s, err)
+	}
+
+	unit := strings.ToUpper(strings.TrimSpace(s[i:]))
+	unit = strings.TrimSuffix(unit, "B") // "MB" -> "M"，"B" -> ""
+	var mult int64
+	switch unit {
+	case "":
+		mult = 1
+	case "K":
+		mult = 1 << 10
+	case "M":
+		mult = 1 << 20
+	case "G":
+		mult = 1 << 30
+	case "T":
+		mult = 1 << 40
+	default:
+		return 0, fmt.Errorf("unknown unit %q in size %q", s[i:], s)
+	}
+	// 溢出检查：n*mult 超过 int64 上限会回绕为负（后续会被误解释为「不限制」）。
+	if mult != 0 && n > math.MaxInt64/mult {
+		return 0, fmt.Errorf("size %q overflows int64", s)
+	}
+	return n * mult, nil
+}
+
 // Config 保存 AD 认证与 token 的全部配置。
 //
 // 唯一配置源为 config.yaml（LoadConfig 读取），不再从环境变量注入。
@@ -247,6 +392,8 @@ type Config struct {
 	Codex CodexConfig `yaml:"codex"`
 	// Sandbox Linux 用户命名空间沙箱配置（enabled=false 退回传统 sudo 模式）。
 	Sandbox SandboxConfig `yaml:"sandbox"`
+	// Audit 审计录制配置（DESIGN_AUDIT §10）。
+	Audit AuditConfig `yaml:"audit"`
 	// ADTimeout AD 连接/操作超时（派生，不参与 yaml）。
 	ADTimeout time.Duration
 	// SessionTTLd 默认长期会话时长（派生，不参与 yaml）。
@@ -262,6 +409,50 @@ type Config struct {
 	MaxLongN int
 	// MaxTotalN 会话总数上限（派生，不参与 yaml）。
 	MaxTotalN int
+
+	// AuditEnabled 审计是否启用（派生，不参与 yaml）。
+	AuditEnabled bool
+	// AuditDir 录制根目录（派生，不参与 yaml）。
+	AuditDir string
+	// AuditRecordIn 是否录制输入事件（派生，不参与 yaml）。
+	AuditRecordIn bool
+	// AuditPasswordMode ECHO 关闭时输入处理：mask|omit|plaintext（派生，不参与 yaml）。
+	AuditPasswordMode string
+	// AuditPasswordMaskWhen 脱敏判据：echo_verify|echo_verify_tui|echo_off_canonical|echo_off
+	//（派生，不参与 yaml）。
+	AuditPasswordMaskWhen string
+	// AuditEchoVerifyTimeout EVW hang 兜底时长（派生，不参与 yaml）。
+	AuditEchoVerifyTimeout time.Duration
+	// AuditEchoVerifyHangPolicy hang 兜底裁决策略（派生，不参与 yaml）：mask|reached_plain。
+	AuditEchoVerifyHangPolicy string
+	// AuditEchoVerifyStrictBatch echo=on 整块含换行一律掩码（派生，不参与 yaml）。
+	AuditEchoVerifyStrictBatch bool
+	// AuditEchoVerifyTUI 是否启用 alt-screen TUI 门（派生，不参与 yaml）。
+	AuditEchoVerifyTUI bool
+	// AuditMaxBytes 单会话 cast 字节上限（派生，不参与 yaml）。
+	AuditMaxBytes int64
+	// AuditTotalBytes 总量配额字节数（派生，不参与 yaml）。
+	AuditTotalBytes int64
+	// AuditRetention 保留期（派生，不参与 yaml；0 表示不自动清理）。
+	AuditRetention time.Duration
+	// AuditCleanupIvl 清扫间隔（派生，不参与 yaml）。
+	AuditCleanupIvl time.Duration
+	// AuditFailClosed recorder 打开失败时是否拒绝建会话（派生，不参与 yaml）。
+	AuditFailClosed bool
+	// AuditTrustProxy 是否信任 X-Forwarded-For（派生，不参与 yaml）。
+	AuditTrustProxy bool
+	// AuditUserSelf 普通用户是否可回放本人录屏（派生，不参与 yaml）。
+	AuditUserSelf bool
+	// AuditAdmins 审计员白名单（用户名小写归一，派生，不参与 yaml）。
+	AuditAdmins map[string]bool
+}
+
+// IsAuditor 判断用户名是否为审计员（白名单，大小写不敏感）。
+func (c *Config) IsAuditor(u string) bool {
+	if c == nil || c.AuditAdmins == nil {
+		return false
+	}
+	return c.AuditAdmins[strings.ToLower(u)]
 }
 
 // DefaultADTimeout 默认 AD 连接/操作超时（5 秒）。
@@ -396,6 +587,52 @@ sandbox:
   seccomp: true
   proc_hidepid: true
   cgroup_root: "/sys/fs/cgroup/webshell_sandbox"
+
+# 审计录制（DESIGN_AUDIT §10）
+# enabled: 是否启用录制（缺省 true；false 时埋点为空操作，零开销）
+# dir: 录制根目录（缺省 "/var/log/webshell/audit"）
+# record_input: 是否录制输入事件（缺省 true）；false 仅录 output/resize
+# password_input: ECHO 关闭时的输入处理，mask（缺省，等长掩码）| omit（不记）| plaintext（明文，慎用）
+# password_mask_when: 脱敏判据：
+#   echo_verify（缺省）：EVW 输入间边界窗口——raw 输入先待定，其观察窗口为
+#     [输入块到达, 下一个输入块/边界事件)；窗口内观察到回显则明文、否则掩码。
+#     窗口迟迟未被关闭时由 hang 兜底（缺省掩码），避免末尾字符被 Enter 后
+#     printback 误判明文。echo_verify_tui：同 EVW 且启用 alt-screen TUI 门
+#     （进入 alt-screen 后输入直接明文）；echo_off_canonical（遗留，仅
+#     ECHO=off && ICANON=on 掩码，raw 不脱敏）；echo_off（严格，ECHO=off 即掩码）
+# echo_verify_hang_ms: EVW hang 兜底时长（毫秒，缺省 2000）；窗口未被下一输入/边界
+#   关闭时，超过此时长一律按 hang 策略结算
+# echo_verify_hang_policy: hang 兜底策略，mask（缺省，一律掩码）| reached_plain（已
+#   观测到回显的记明文）
+# echo_verify_strict_batch: echo=on 且整块含换行时一律掩码（缺省 false，严格整块）
+# echo_verify_latency_ms: 【已废弃】旧键，兼容别名，按 hang 兜底语义读取
+# echo_verify_tui: 是否启用 alt-screen TUI 门（缺省 false；echo_verify_tui 判据会隐式开启）
+# max_session_bytes: 单会话 cast 上限（缺省 "100M"）
+# max_total_bytes: 总量配额，最旧优先清理（缺省 "20G"）
+# retention_days: 保留期（按 ended_at 判定，0 表示不自动清理，缺省 90）
+# cleanup_interval: 清扫间隔（缺省 "1h"）
+# fail_closed: recorder 打开失败时是否拒绝建会话；缺省 false（照常开会话，fail-open）
+# trust_proxy: 是否信任 X-Forwarded-For（防伪造，缺省 false）
+# user_can_view_self: 普通用户是否可回放本人录屏（缺省 true）
+# admins: 审计员用户名白名单
+audit:
+  enabled: true
+  dir: "/var/log/webshell/audit"
+  record_input: true
+  password_input: mask
+  password_mask_when: echo_verify
+  echo_verify_hang_ms: 2000
+  echo_verify_hang_policy: mask
+  echo_verify_strict_batch: false
+  echo_verify_tui: false
+  max_session_bytes: "100M"
+  max_total_bytes: "20G"
+  retention_days: 90
+  cleanup_interval: "1h"
+  fail_closed: false
+  trust_proxy: false
+  user_can_view_self: true
+  admins: ["alice", "auditor"]
 `
 
 // LoadConfig 从指定的 config.yaml 文件加载配置。
@@ -513,6 +750,119 @@ func LoadConfig(path string) (*Config, error) {
 		}
 		if cfg.Sandbox.RootfsPath == "" {
 			return nil, errors.New("missing required config sandbox.rootfs_path")
+		}
+	}
+
+	// audit 配置派生与默认（DESIGN_AUDIT §10）。
+	cfg.AuditEnabled = cfg.Audit.EnabledValue()
+	if cfg.Audit.Dir == "" {
+		cfg.Audit.Dir = DefaultAuditDir
+	}
+	cfg.AuditDir = cfg.Audit.Dir
+	cfg.AuditRecordIn = cfg.Audit.RecordInputEnabled()
+
+	if cfg.Audit.PasswordInput == "" {
+		cfg.Audit.PasswordInput = DefaultAuditPasswordInput
+	}
+	cfg.AuditPasswordMode = cfg.Audit.PasswordInput
+	if cfg.Audit.PasswordMaskWhen == "" {
+		cfg.Audit.PasswordMaskWhen = DefaultAuditPasswordMaskWhen
+	}
+	cfg.AuditPasswordMaskWhen = cfg.Audit.PasswordMaskWhen
+
+	// EVW hang 兜底时长：优先 echo_verify_hang_ms；其次旧键 echo_verify_latency_ms
+	// 兼容映射（并告警建议改名）；均未设置走默认 2000ms。
+	if cfg.Audit.EchoVerifyHangMs > 0 {
+		cfg.AuditEchoVerifyTimeout = time.Duration(cfg.Audit.EchoVerifyHangMs) * time.Millisecond
+	} else if cfg.Audit.EchoVerifyLatencyMs > 0 {
+		cfg.AuditEchoVerifyTimeout = time.Duration(cfg.Audit.EchoVerifyLatencyMs) * time.Millisecond
+		log.Printf("audit: config key echo_verify_latency_ms is deprecated; use echo_verify_hang_ms (value now treated as EVW hang fallback timeout)")
+	} else {
+		cfg.AuditEchoVerifyTimeout = DefaultAuditEchoVerifyHangMs * time.Millisecond
+	}
+
+	// hang 兜底策略：空走默认 mask。
+	if cfg.Audit.EchoVerifyHangPolicy == "" {
+		cfg.Audit.EchoVerifyHangPolicy = DefaultAuditEchoVerifyHangPolicy
+	}
+	cfg.AuditEchoVerifyHangPolicy = cfg.Audit.EchoVerifyHangPolicy
+	cfg.AuditEchoVerifyStrictBatch = cfg.Audit.EchoVerifyStrictBatch
+
+	// echo_verify_tui 判据隐式开启 TUI 门。
+	cfg.AuditEchoVerifyTUI = cfg.Audit.EchoVerifyTUI || cfg.AuditPasswordMaskWhen == "echo_verify_tui"
+
+	maxSession, err := parseSize(cfg.Audit.MaxSessionBytes, DefaultAuditMaxSessionBytes)
+	if err != nil {
+		return nil, fmt.Errorf("invalid config audit.max_session_bytes: %w", err)
+	}
+	cfg.AuditMaxBytes = maxSession
+	maxTotal, err := parseSize(cfg.Audit.MaxTotalBytes, DefaultAuditMaxTotalBytes)
+	if err != nil {
+		return nil, fmt.Errorf("invalid config audit.max_total_bytes: %w", err)
+	}
+	cfg.AuditTotalBytes = maxTotal
+
+	// retention_days 三态语义：
+	//   nil（未设置）→ 默认 DefaultAuditRetention（90 天）
+	//   显式 >0     → 对应天数
+	//   显式 0      → 0（不自动清理）
+	//   显式 <0     → 非法
+	if cfg.Audit.RetentionDays != nil {
+		if *cfg.Audit.RetentionDays < 0 {
+			return nil, fmt.Errorf("invalid config audit.retention_days %d (must be >= 0)", *cfg.Audit.RetentionDays)
+		}
+		if *cfg.Audit.RetentionDays == 0 {
+			cfg.AuditRetention = 0
+		} else {
+			cfg.AuditRetention = time.Duration(*cfg.Audit.RetentionDays) * 24 * time.Hour
+		}
+	} else {
+		cfg.AuditRetention = DefaultAuditRetention
+	}
+
+	// cleanup_interval：空走默认；非法或非正数报错（P2 将用于 time.Ticker）。
+	cleanupIvl := DefaultAuditCleanupInterval
+	if cfg.Audit.CleanupInterval != "" {
+		d, derr := time.ParseDuration(cfg.Audit.CleanupInterval)
+		if derr != nil {
+			return nil, fmt.Errorf("invalid config audit.cleanup_interval %q: %w", cfg.Audit.CleanupInterval, derr)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("invalid config audit.cleanup_interval %q (must be > 0)", cfg.Audit.CleanupInterval)
+		}
+		cleanupIvl = d
+	}
+	cfg.AuditCleanupIvl = cleanupIvl
+
+	cfg.AuditFailClosed = cfg.Audit.FailClosed
+	cfg.AuditTrustProxy = cfg.Audit.TrustProxy
+	cfg.AuditUserSelf = cfg.Audit.UserCanViewSelfEnabled()
+
+	// 审计员白名单：用户名小写归一（与 IsAuditor 同一口径）。
+	cfg.AuditAdmins = make(map[string]bool, len(cfg.Audit.Admins))
+	for _, a := range cfg.Audit.Admins {
+		if a == "" {
+			continue
+		}
+		cfg.AuditAdmins[strings.ToLower(a)] = true
+	}
+
+	// 枚举校验（fail-fast）：仅在启用审计时需要。
+	if cfg.AuditEnabled {
+		switch cfg.AuditPasswordMode {
+		case "mask", "omit", "plaintext":
+		default:
+			return nil, fmt.Errorf("invalid config audit.password_input %q (must be mask|omit|plaintext)", cfg.Audit.PasswordInput)
+		}
+		switch cfg.AuditPasswordMaskWhen {
+		case "echo_verify", "echo_verify_tui", "echo_off_canonical", "echo_off":
+		default:
+			return nil, fmt.Errorf("invalid config audit.password_mask_when %q (must be echo_verify|echo_verify_tui|echo_off_canonical|echo_off)", cfg.Audit.PasswordMaskWhen)
+		}
+		switch cfg.AuditEchoVerifyHangPolicy {
+		case "mask", "reached_plain":
+		default:
+			return nil, fmt.Errorf("invalid config audit.echo_verify_hang_policy %q (must be mask|reached_plain)", cfg.Audit.EchoVerifyHangPolicy)
 		}
 	}
 

@@ -136,3 +136,51 @@ sandbox:
   # https_proxy: ""   # https 代理（如 "http://proxy.example.com:8080"），非空时注入沙箱环境变量
   # no_proxy: ""      # 不使用代理的主机（如 "localhost,127.0.0.1"），非空时注入沙箱环境变量
 
+# 审计录制（DESIGN_AUDIT §10）
+# enabled: 是否启用录制（缺省 true；false 时埋点为空操作，零开销）
+# dir: 录制根目录（缺省 "/var/log/webshell/audit"）
+# record_input: 是否录制输入事件（缺省 true）；false 仅录 output/resize
+#   （回放侧默认不显示 input，需审计员显式开启）
+# password_input: ECHO 关闭时的输入处理，mask（缺省，等长掩码）| omit（不记）| plaintext（明文，慎用）
+# password_mask_when: 脱敏判据：
+#   echo_verify（缺省）：EVW 输入间边界窗口——raw 输入先待定，其观察窗口为
+#     [输入块到达, 下一个输入块/边界事件)；窗口内观察到回显则明文、否则掩码。
+#     窗口迟迟未被关闭时由 hang 兜底（缺省掩码），避免末尾字符被 Enter 后
+#     printback 误判明文。echo_verify_tui：同 EVW 且启用 alt-screen TUI 门
+#     （进入 alt-screen 后输入直接明文）；echo_off_canonical（遗留，仅
+#     ECHO=off && ICANON=on 掩码，raw 不脱敏）；echo_off（严格，ECHO=off 即掩码）
+# echo_verify_hang_ms: EVW hang 兜底时长（毫秒，缺省 2000）；窗口未被下一输入/边界
+#   关闭时，超过此时长一律按 hang 策略结算
+# echo_verify_hang_policy: hang 兜底策略，mask（缺省，一律掩码）| reached_plain（已
+#   观测到回显的记明文）
+# echo_verify_strict_batch: echo=on 且整块含换行时一律掩码（缺省 false，严格整块）
+# echo_verify_latency_ms: 【已废弃】旧键，兼容别名，按 hang 兜底语义读取
+# echo_verify_tui: 是否启用 alt-screen TUI 门（缺省 false；echo_verify_tui 判据会隐式开启）
+# max_session_bytes: 单会话 cast 上限（缺省 "100M"）
+# max_total_bytes: 总量配额，最旧优先清理（缺省 "20G"）
+# retention_days: 保留期（按 ended_at 判定，0 表示不自动清理，缺省 90）
+# cleanup_interval: 清扫间隔（缺省 "1h"）
+# fail_closed: recorder 打开失败时是否拒绝建会话；缺省 false（照常开会话，fail-open）
+# trust_proxy: 是否信任 X-Forwarded-For（防伪造，缺省 false）
+# user_can_view_self: 普通用户是否可回放本人录屏（缺省 true）
+# admins: 审计员用户名白名单
+audit:
+  enabled: true
+  dir: "/var/log/webshell/audit"
+  record_input: true
+  password_input: mask
+  password_mask_when: echo_verify
+  echo_verify_hang_ms: 2000
+  echo_verify_hang_policy: mask
+  echo_verify_strict_batch: false
+  echo_verify_tui: false
+  max_session_bytes: "100M"
+  max_total_bytes: "20G"
+  retention_days: 90
+  cleanup_interval: "1h"
+  fail_closed: false
+  trust_proxy: false
+  user_can_view_self: true
+  admins: ["alice", "auditor"]
+
+

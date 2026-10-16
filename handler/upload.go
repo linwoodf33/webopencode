@@ -83,6 +83,10 @@ func NewUploadHandler(mgr *SessionManager) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, errorResponse{Error: msg})
 			return
 		}
+		// 审计时间线：upload（上传不经 pty，需显式补记）。
+		if hs.rec != nil {
+			hs.rec.Event("upload", map[string]any{"file": filename, "dest": dest})
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"ok": "true", "path": dest})
 	}
 }

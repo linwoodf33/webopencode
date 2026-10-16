@@ -751,3 +751,473 @@ body {
 #terminal-toolbar #font-controls #btn-sessions:hover {
   background: #5a5a5a;
 }
+
+/* ===== 审计 / 回放 ===== */
+
+/* 会话面板标题区的「审计」按钮（风格与登出一致） */
+#session-header #btn-audit {
+  padding: 6px 16px;
+  background: #2e7d5b;
+  border: 1px solid #39986f;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#session-header #btn-audit:hover {
+  background: #39986f;
+}
+
+/* 审计录屏列表面板 */
+#audit-panel {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow-y: auto;
+  background: radial-gradient(circle at 50% 20%, #2a2a2a 0%, #1e1e1e 70%);
+}
+
+#audit-box {
+  width: 860px;
+  max-width: 94%;
+  margin: 40px 0;
+  padding: 28px;
+  background: #252526;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+}
+
+#audit-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+#audit-header h1 {
+  font-size: 20px;
+  color: #4fc1ff;
+  letter-spacing: 1px;
+  margin-right: 8px;
+}
+
+#audit-user-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#audit-user-filter #audit-username-filter {
+  width: 200px;
+  padding: 6px 10px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  color: #f0f0f0;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+
+#audit-user-filter #audit-username-filter:focus {
+  border-color: #4fc1ff;
+}
+
+#audit-user-filter #audit-filter-btn {
+  padding: 6px 14px;
+  background: #2f6f9f;
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#audit-user-filter #audit-filter-btn:hover {
+  background: #3a83ba;
+}
+
+#audit-header #btn-audit-back {
+  margin-left: auto;
+  padding: 6px 16px;
+  background: #3c3c3c;
+  border: 1px solid #4a4a4a;
+  border-radius: 4px;
+  color: #f0f0f0;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#audit-header #btn-audit-back:hover {
+  background: #4a4a4a;
+}
+
+#audit-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+}
+
+#audit-date-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#audit-date-sep {
+  color: #a0a0a0;
+  font-size: 13px;
+}
+
+#audit-date-from,
+#audit-date-to {
+  padding: 6px 10px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  color: #f0f0f0;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  color-scheme: dark;
+}
+
+#audit-date-from:focus,
+#audit-date-to:focus {
+  border-color: #4fc1ff;
+}
+
+#audit-date-filter-btn,
+#audit-date-reset-btn {
+  padding: 6px 14px;
+  background: #2f6f9f;
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#audit-date-filter-btn:hover,
+#audit-date-reset-btn:hover {
+  background: #3a83ba;
+}
+
+#audit-date-reset-btn {
+  background: #3c3c3c;
+}
+
+#audit-date-reset-btn:hover {
+  background: #4a4a4a;
+}
+
+#audit-page-size-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #a0a0a0;
+  font-size: 13px;
+}
+
+#audit-page-size {
+  padding: 6px 8px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  color: #f0f0f0;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  cursor: pointer;
+  color-scheme: dark;
+}
+
+#audit-page-size:focus {
+  border-color: #4fc1ff;
+}
+
+#audit-pagination {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+#audit-prev-btn,
+#audit-next-btn {
+  padding: 6px 14px;
+  background: #2f6f9f;
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#audit-prev-btn:hover:not(:disabled),
+#audit-next-btn:hover:not(:disabled) {
+  background: #3a83ba;
+}
+
+#audit-prev-btn:disabled,
+#audit-next-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+#audit-page-info {
+  color: #a0a0a0;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+#audit-list {
+  margin-bottom: 20px;
+}
+
+.audit-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 12px;
+  margin-bottom: 8px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+}
+
+.audit-row .audit-user {
+  color: #f0f0f0;
+  font-size: 13px;
+  font-weight: bold;
+  min-width: 72px;
+}
+
+.audit-row .audit-mode {
+  color: #4fc1ff;
+  font-size: 13px;
+  min-width: 64px;
+}
+
+.audit-row .audit-active {
+  font-size: 12px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: #8a6d1f;
+  color: #ffe9a8;
+}
+
+.audit-row .audit-meta {
+  color: #a0a0a0;
+  font-size: 12px;
+}
+
+.audit-row .audit-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.audit-row .audit-actions button {
+  padding: 4px 10px;
+  background: #2f6f9f;
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.audit-row .audit-actions button:hover {
+  background: #3a83ba;
+}
+
+.audit-row .audit-actions button.danger {
+  background: #8a3b3b;
+}
+
+.audit-row .audit-actions button.danger:hover {
+  background: #a54848;
+}
+
+#audit-empty {
+  padding: 16px;
+  margin-bottom: 20px;
+  color: #a0a0a0;
+  font-size: 13px;
+  text-align: center;
+  border: 1px dashed #3c3c3c;
+  border-radius: 6px;
+}
+
+/* 回放面板 */
+#playback-panel {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow-y: auto;
+  background: radial-gradient(circle at 50% 20%, #2a2a2a 0%, #1e1e1e 70%);
+}
+
+#playback-box {
+  width: 90%;
+  max-width: 1000px;
+  margin: 32px 0;
+  padding: 20px 24px 24px;
+  background: #252526;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+}
+
+#playback-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+#playback-toolbar #playback-title {
+  color: #4fc1ff;
+  font-size: 16px;
+  letter-spacing: 1px;
+}
+
+#playback-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+#show-input-wrap {
+  color: #f0f0f0;
+  font-size: 13px;
+}
+
+#show-input-wrap label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+#playback-actions #btn-playback-back {
+  padding: 6px 16px;
+  background: #3c3c3c;
+  border: 1px solid #4a4a4a;
+  border-radius: 4px;
+  color: #f0f0f0;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#playback-actions #btn-playback-back:hover {
+  background: #4a4a4a;
+}
+
+/* asciinema-player 挂载容器：给足空间，深色底 */
+#playback {
+  width: 100%;
+  min-height: 240px;
+  background: #000;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  overflow: auto;
+  padding: 8px;
+}
+
+/* 输入面板：等宽字体、可滚动、默认隐藏 */
+#input-panel {
+  margin-top: 14px;
+  max-height: 260px;
+  overflow-y: auto;
+  background: #1a1a1a;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-family: "Menlo", "Consolas", "Monaco", "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+#input-panel .input-row {
+  display: flex;
+  gap: 10px;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+#input-panel .input-time {
+  color: #7db8e8;
+  flex-shrink: 0;
+}
+
+#input-panel .input-data {
+  color: #f0f0f0;
+}
+
+#input-panel .input-empty {
+  color: #a0a0a0;
+}
+
+/* 录制明示横条：顶部醒目提示 */
+#recording-notice {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: #f5e6a8;
+  color: #3a2f00;
+  font-size: 13px;
+  border-bottom: 1px solid #d9c46a;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+#recording-notice #recording-notice-text {
+  line-height: 1.5;
+}
+
+#recording-notice #recording-notice-ok {
+  flex-shrink: 0;
+  padding: 5px 14px;
+  background: #3a2f00;
+  border: none;
+  border-radius: 4px;
+  color: #f5e6a8;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#recording-notice #recording-notice-ok:hover {
+  background: #554600;
+}

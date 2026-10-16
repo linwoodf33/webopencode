@@ -3,12 +3,16 @@ package handler
 import (
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
 
+	"webshell/audit"
 	"webshell/auth"
 	"webshell/protocol"
 	"webshell/pty"
@@ -41,6 +45,33 @@ func wsClose(conn *websocket.Conn, reason string) {
 	_ = conn.Close()
 }
 
+// clientInfoFromRequest 从 HTTP 请求采集客户端来源信息（DESIGN_AUDIT §5）。
+//
+// IP 取 r.RemoteAddr（去端口）；仅当 trustProxy 为真且存在 X-Forwarded-For 时，
+// 改用其首个非空段（防伪造，默认关闭），并原样保留整串到 ForwardedFor。
+func clientInfoFromRequest(r *http.Request, trustProxy bool) audit.ClientInfo {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || host == "" {
+		host = r.RemoteAddr
+	}
+	ci := audit.ClientInfo{
+		IP:        host,
+		UserAgent: r.UserAgent(),
+	}
+	if trustProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			ci.ForwardedFor = xff
+			for _, part := range strings.Split(xff, ",") {
+				if p := strings.TrimSpace(part); p != "" {
+					ci.IP = p
+					break
+				}
+			}
+		}
+	}
+	return ci
+}
+
 // NewWs 处理 /ws?ticket=<t> 端点。
 //
 // 统一接入：先消费一次性 ticket（action=create|attach），再升级 WebSocket。
@@ -62,6 +93,9 @@ func NewWs(mgr *SessionManager, tickets *auth.TicketStore, cfg *auth.Config) htt
 			return
 		}
 
+		// 采集来源信息（Upgrade 前后 RemoteAddr 均有效），用于审计。
+		clientInfo := clientInfoFromRequest(r, cfg.AuditTrustProxy)
+
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			log.Printf("websocket upgrade failed: %v", err)
@@ -82,7 +116,7 @@ func NewWs(mgr *SessionManager, tickets *auth.TicketStore, cfg *auth.Config) htt
 				return
 			}
 			ac := &attachedConn{conn: conn}
-			if !mgr.Attach(ls, ac) {
+			if !mgr.Attach(ls, ac, clientInfo) {
 				return
 			}
 			ls.readLoop(ac)
@@ -137,6 +171,16 @@ func NewWs(mgr *SessionManager, tickets *auth.TicketStore, cfg *auth.Config) htt
 				return
 			}
 
+			// 收集本次补全的 auth 环境变量名清单（排序、绝不含值），随 meta 落盘。
+			var authProvided []string
+			if len(authEnv) > 0 {
+				authProvided = make([]string, 0, len(authEnv))
+				for k := range authEnv {
+					authProvided = append(authProvided, k)
+				}
+				sort.Strings(authProvided)
+			}
+
 			sess, serr := pty.NewSessionForUserMode(username, homeDir, effCfg, effCodexCfg, sandboxCfg, sessionID, authEnv)
 			if serr != nil {
 				log.Printf("pty session create failed: %v", serr)
@@ -145,13 +189,15 @@ func NewWs(mgr *SessionManager, tickets *auth.TicketStore, cfg *auth.Config) htt
 			}
 
 			ls, cerr := mgr.Create(CreateParams{
-				ID:        sessionID,
-				Username:  username,
-				Mode:      mode,
-				LongLived: purpose.Type == "long",
-				Hours:     purpose.Hours,
-				MaxLong:   cfg.MaxLongN,
-				MaxTotal:  cfg.MaxTotalN,
+				ID:           sessionID,
+				Username:     username,
+				Mode:         mode,
+				LongLived:    purpose.Type == "long",
+				Hours:        purpose.Hours,
+				MaxLong:      cfg.MaxLongN,
+				MaxTotal:     cfg.MaxTotalN,
+				Client:       clientInfo,
+				AuthProvided: authProvided,
 			}, sess)
 			if cerr != nil {
 				reason := "failed to create session"
@@ -166,7 +212,7 @@ func NewWs(mgr *SessionManager, tickets *auth.TicketStore, cfg *auth.Config) htt
 			}
 
 			ac := &attachedConn{conn: conn}
-			mgr.Attach(ls, ac)
+			mgr.Attach(ls, ac, clientInfo)
 			ls.readLoop(ac)
 			mgr.Detach(ls, ac)
 

@@ -75,6 +75,35 @@
   var modePanel = document.getElementById("mode-panel");
   var welcomeEl = document.getElementById("toolbar-welcome");
 
+  // 审计 / 回放相关元素。
+  var btnAudit = document.getElementById("btn-audit");
+  var auditPanel = document.getElementById("audit-panel");
+  var auditUserFilter = document.getElementById("audit-user-filter");
+  var auditUsernameFilter = document.getElementById("audit-username-filter");
+  var auditFilterBtn = document.getElementById("audit-filter-btn");
+  var auditList = document.getElementById("audit-list");
+  var auditEmpty = document.getElementById("audit-empty");
+  var btnAuditBack = document.getElementById("btn-audit-back");
+  var playbackPanel = document.getElementById("playback-panel");
+  var playbackTitle = document.getElementById("playback-title");
+  var btnPlaybackBack = document.getElementById("btn-playback-back");
+  var showInputWrap = document.getElementById("show-input-wrap");
+  var showInputToggle = document.getElementById("show-input-toggle");
+  var playbackEl = document.getElementById("playback");
+  var inputPanel = document.getElementById("input-panel");
+  var recordingNotice = document.getElementById("recording-notice");
+  var recordingNoticeOk = document.getElementById("recording-notice-ok");
+
+  // 审计列表：日期间隔筛选 / 分页 / 单页行数。
+  var auditDateFrom = document.getElementById("audit-date-from");
+  var auditDateTo = document.getElementById("audit-date-to");
+  var auditDateFilterBtn = document.getElementById("audit-date-filter-btn");
+  var auditDateResetBtn = document.getElementById("audit-date-reset-btn");
+  var auditPageSizeSel = document.getElementById("audit-page-size");
+  var auditPrevBtn = document.getElementById("audit-prev-btn");
+  var auditNextBtn = document.getElementById("audit-next-btn");
+  var auditPageInfo = document.getElementById("audit-page-info");
+
   var term = null;
   var fitAddon = null;
   var ws = null;
@@ -91,6 +120,13 @@
   var currentUser = null;
   var currentMode = "bash";
 
+  // 回放状态：当前打开的审计条目、asciinema-player 实例、已加载的 cast 文本。
+  var currentPlaybackItem = null;
+  var playerInstance = null;
+  var playerScriptLoaded = false;   // asciinema-player.js 是否已注入并加载完成
+  var playerScriptLoading = false;  // 是否正在注入（防并发重复注入）
+  var playerLoadCbs = [];           // 注入期间排队的回调
+
   // 服务端下发的会话配置（登录响应提供），用于面板默认值与上限校验。
   var cfg = {
     opencodeEnabled: false,
@@ -99,7 +135,23 @@
     maxSessionTtlHours: 168,
     maxLongSessions: 3,
     maxTotalSessions: 10,
+    auditEnabled: false,   // /api/login 的 audit_enabled：是否启用录制
+    isAuditor: false,      // /api/login 的 is_auditor：是否审计员
   };
+
+  // 录制明示「已读」标记（sessionStorage，本标签页内有效）。
+  var AUDIT_NOTICE_KEY = "webshell.audit.notice_dismissed";
+
+  // 审计列表偏好（localStorage：记住上次日期间隔与单页行数）。
+  var AUDIT_PREFS_KEY = "webshell.auditPrefs";
+  var AUDIT_PAGE_SIZES = [10, 20, 30, 50];
+
+  // 审计列表分页 / 筛选状态。
+  var auditPage = 1;
+  var auditPageSize = 10;
+  var auditFromDate = "";
+  var auditToDate = "";
+  var auditTotal = 0;
 
   var MGMT_STORAGE_KEY = "webshell.mgmt";
   var SESSION_STORAGE_KEY = "webshell.session";
@@ -121,6 +173,8 @@
           max_session_ttl_hours: data.max_session_ttl_hours,
           max_long_sessions: data.max_long_sessions,
           max_total_sessions: data.max_total_sessions,
+          is_auditor: !!data.is_auditor,
+          audit_enabled: !!data.audit_enabled,
         })
       );
     } catch (e) {}
@@ -155,6 +209,8 @@
     if (!isNaN(v) && v > 0) cfg.maxLongSessions = v;
     v = parseInt(src.max_total_sessions, 10);
     if (!isNaN(v) && v > 0) cfg.maxTotalSessions = v;
+    if (typeof src.audit_enabled === "boolean") cfg.auditEnabled = src.audit_enabled;
+    if (typeof src.is_auditor === "boolean") cfg.isAuditor = src.is_auditor;
   }
 
   // 会话持久化：把 sessionID/mode 存入 sessionStorage，页面刷新后据此恢复同一终端。
@@ -219,7 +275,7 @@
   // ===== 面板切换 =====
 
   function showOnly(el) {
-    var panels = [loginPanel, modePanel, sessionPanel, termWrap];
+    var panels = [loginPanel, modePanel, sessionPanel, termWrap, auditPanel, playbackPanel];
     for (var i = 0; i < panels.length; i++) {
       if (panels[i]) panels[i].classList.add("hidden");
     }
@@ -759,6 +815,7 @@
       try { ws.close(); } catch (e) {}
       ws = null;
     }
+    if (recordingNotice) recordingNotice.classList.add("hidden");
     showOnly(loginPanel);
     loginError.textContent = message || "";
     usernameInput.value = "";
@@ -785,6 +842,7 @@
     }
     setWelcome(currentUser);
     showOnly(termWrap);
+    maybeShowRecordingNotice();
     createTerminal();
     term.writeln("\x1b[32m[logged in as " + currentUser + "]\x1b[0m");
     connect(ticket);
@@ -812,6 +870,7 @@
   // autoBashIfEmpty：列表为空且仅 bash 可用时，保持现状直接进入 bash 终端。
   function showSessionPanel(autoBashIfEmpty) {
     showOnly(sessionPanel);
+    syncAuditButton();
     if (sessionUserEl) sessionUserEl.textContent = "已登录：" + (currentUser || "");
     // 按启用状态显隐新建模式按钮。
     newModeOpencode.classList.toggle("hidden", !cfg.opencodeEnabled);
@@ -1129,6 +1188,430 @@
       .catch(done);
   }
 
+  // ===== 审计 / 回放 =====
+
+  // 按登录配置显隐审计入口（audit_enabled 或 is_auditor 任一为真即展示）。
+  function syncAuditButton() {
+    if (!btnAudit) return;
+    var show = !!(cfg.auditEnabled || cfg.isAuditor);
+    btnAudit.classList.toggle("hidden", !show);
+  }
+
+  // 录制明示：仅在启用录制时提示；已读过后不再重复。
+  function maybeShowRecordingNotice() {
+    if (!recordingNotice) return;
+    if (!cfg.auditEnabled) return;
+    var dismissed = false;
+    try { dismissed = sessionStorage.getItem(AUDIT_NOTICE_KEY) === "1"; } catch (e) {}
+    if (dismissed) return;
+    recordingNotice.classList.remove("hidden");
+  }
+
+  function dismissRecordingNotice() {
+    if (recordingNotice) recordingNotice.classList.add("hidden");
+    try { sessionStorage.setItem(AUDIT_NOTICE_KEY, "1"); } catch (e) {}
+  }
+
+  // 打开审计列表页。
+  function showAudit() {
+    showOnly(auditPanel);
+    if (auditUserFilter) auditUserFilter.classList.toggle("hidden", !cfg.isAuditor);
+    maybeShowRecordingNotice();
+    loadAuditList();
+  }
+
+  // 组装审计列表查询参数（纯函数，无副作用）。
+  function buildQueryParams() {
+    var p = [];
+    if (cfg.isAuditor && auditUsernameFilter) {
+      var u = auditUsernameFilter.value.trim();
+      if (u) p.push("username=" + encodeURIComponent(u));
+    }
+    if (auditFromDate) p.push("from_date=" + encodeURIComponent(auditFromDate));
+    if (auditToDate) p.push("to_date=" + encodeURIComponent(auditToDate));
+    p.push("offset=" + String((auditPage - 1) * auditPageSize));
+    p.push("limit=" + String(auditPageSize));
+    return p;
+  }
+
+  // 更新分页控件状态与页码信息。
+  function updatePagination(total) {
+    if (!auditPrevBtn || !auditNextBtn || !auditPageInfo) return;
+    var pageSize = auditPageSize;
+    var totalPages = pageSize > 0 ? Math.ceil(total / pageSize) : 0;
+    auditPageInfo.textContent = "第 " + auditPage + " / " + totalPages + " 页 · 共 " + total + " 条";
+    auditPrevBtn.disabled = (auditPage <= 1);
+    auditNextBtn.disabled = (auditPage >= totalPages || totalPages === 0);
+  }
+
+  // 读取上次审计列表偏好并回填控件（损坏则回退默认 pageSize=10、空日期）。
+  function applyAuditPrefs() {
+    var p = { pageSize: 10, from: "", to: "" };
+    try {
+      var raw = localStorage.getItem(AUDIT_PREFS_KEY);
+      if (raw) {
+        var o = JSON.parse(raw);
+        if (o && typeof o === "object") {
+          if (AUDIT_PAGE_SIZES.indexOf(o.pageSize) !== -1) p.pageSize = o.pageSize;
+          if (typeof o.from === "string" && /^\d{4}-\d{2}-\d{2}$/.test(o.from)) p.from = o.from;
+          if (typeof o.to === "string" && /^\d{4}-\d{2}-\d{2}$/.test(o.to)) p.to = o.to;
+        }
+      }
+    } catch (e) {}
+    auditPageSize = p.pageSize;
+    auditFromDate = p.from;
+    auditToDate = p.to;
+    if (auditPageSizeSel) auditPageSizeSel.value = String(p.pageSize);
+    if (auditDateFrom) auditDateFrom.value = p.from;
+    if (auditDateTo) auditDateTo.value = p.to;
+  }
+
+  // 保存审计列表偏好（pageSize / 日期间隔）。
+  function saveAuditPrefs() {
+    try {
+      localStorage.setItem(
+        AUDIT_PREFS_KEY,
+        JSON.stringify({ pageSize: auditPageSize, from: auditFromDate, to: auditToDate })
+      );
+    } catch (e) {}
+  }
+
+  // 拉取审计会话列表并渲染。普通用户不传 username（后端强制为本人）；
+  // 审计员可传筛选值（留空=全部）。支持日期间隔、分页。
+  function loadAuditList() {
+    var params = buildQueryParams();
+    var qs = params.length ? ("?" + params.join("&")) : "";
+    apiJSON("/api/audit/sessions" + qs)
+      .then(function (r) {
+        if (r.status === 401) {
+          handleAuthExpired();
+          return;
+        }
+        if (r.ok) {
+          var items = [];
+          var total = 0;
+          if (r.data && Array.isArray(r.data.items)) {
+            items = r.data.items;
+            total = typeof r.data.total === "number" ? r.data.total : items.length;
+          } else if (Array.isArray(r.data)) {
+            items = r.data;
+            total = items.length;
+          }
+          auditTotal = total;
+          // 越界自愈：当前页已超过总页数时回退第一页（保证只回退一次）。
+          if (items.length === 0 && total > 0 && auditPage > 1) {
+            auditPage = 1;
+            loadAuditList();
+            return;
+          }
+          renderAuditList(items);
+          updatePagination(total);
+        } else {
+          showModal((r.data && r.data.error) || "加载录屏列表失败");
+        }
+      })
+      .catch(function () {
+        showModal("网络错误，无法加载录屏列表");
+      });
+  }
+
+  // 时长格式化：3723 → "1h 2m 3s"。
+  function formatDuration(secs) {
+    if (secs === null || secs === undefined || isNaN(Number(secs))) return "—";
+    var s = Math.floor(Number(secs));
+    if (s <= 0) return "0s";
+    var h = Math.floor(s / 3600);
+    var m = Math.floor((s % 3600) / 60);
+    var sec = s % 60;
+    var parts = [];
+    if (h) parts.push(h + "h");
+    if (m) parts.push(m + "m");
+    if (sec || parts.length === 0) parts.push(sec + "s");
+    return parts.join(" ");
+  }
+
+  // 字节大小人类可读：1536 → "1.5 KB"。
+  function formatBytes(n) {
+    var b = Number(n);
+    if (!b || b < 0 || isNaN(b)) return "0 B";
+    var units = ["B", "KB", "MB", "GB", "TB"];
+    var i = 0;
+    while (b >= 1024 && i < units.length - 1) {
+      b /= 1024;
+      i++;
+    }
+    var val = i === 0 ? String(b) : b.toFixed(b >= 100 ? 0 : 1);
+    return val + " " + units[i];
+  }
+
+  // 相对秒格式化 [mm:ss]（输入面板用）。
+  function formatClock(secs) {
+    var s = Math.floor(Number(secs) || 0);
+    if (s < 0) s = 0;
+    var m = Math.floor(s / 60);
+    var sec = s % 60;
+    return (m < 10 ? "0" : "") + m + ":" + (sec < 10 ? "0" : "") + sec;
+  }
+
+  // 渲染审计列表（全部 createElement/textContent，禁止 innerHTML 拼用户串）。
+  function renderAuditList(items) {
+    if (!auditList) return;
+    auditList.innerHTML = "";
+    if (!items || items.length === 0) {
+      if (auditEmpty) auditEmpty.classList.remove("hidden");
+      return;
+    }
+    if (auditEmpty) auditEmpty.classList.add("hidden");
+    for (var i = 0; i < items.length; i++) {
+      auditList.appendChild(buildAuditRow(items[i] || {}));
+    }
+  }
+
+  // 构建单条录屏行。
+  function buildAuditRow(info) {
+    var row = document.createElement("div");
+    row.className = "audit-row";
+
+    if (cfg.isAuditor) {
+      var userEl = document.createElement("span");
+      userEl.className = "audit-user";
+      userEl.textContent = info.username || "—";
+      row.appendChild(userEl);
+    }
+
+    var modeEl = document.createElement("span");
+    modeEl.className = "audit-mode";
+    modeEl.textContent = info.mode || "bash";
+    row.appendChild(modeEl);
+
+    if (info.active) {
+      var badge = document.createElement("span");
+      badge.className = "audit-active";
+      badge.textContent = "进行中";
+      row.appendChild(badge);
+    }
+
+    var createdEl = document.createElement("span");
+    createdEl.className = "audit-meta";
+    createdEl.textContent = "创建：" + formatCreatedAt(info.created_at);
+    row.appendChild(createdEl);
+
+    var durEl = document.createElement("span");
+    durEl.className = "audit-meta";
+    durEl.textContent = "时长：" + formatDuration(info.duration_secs);
+    row.appendChild(durEl);
+
+    var ipEl = document.createElement("span");
+    ipEl.className = "audit-meta";
+    ipEl.textContent = "来源：" + (info.ip || "—");
+    row.appendChild(ipEl);
+
+    var sizeEl = document.createElement("span");
+    sizeEl.className = "audit-meta";
+    sizeEl.textContent = "大小：" + formatBytes(info.size);
+    row.appendChild(sizeEl);
+
+    var actions = document.createElement("div");
+    actions.className = "audit-actions";
+
+    if (!info.active) {
+      var playBtn = document.createElement("button");
+      playBtn.type = "button";
+      playBtn.textContent = "回放";
+      playBtn.addEventListener("click", function () {
+        openPlayback(info);
+      });
+      actions.appendChild(playBtn);
+    }
+
+    if (cfg.isAuditor && !info.active) {
+      var dlBtn = document.createElement("button");
+      dlBtn.type = "button";
+      dlBtn.textContent = "下载";
+      dlBtn.addEventListener("click", function () {
+        downloadAudit(info.session_id);
+      });
+      actions.appendChild(dlBtn);
+    }
+
+    row.appendChild(actions);
+    return row;
+  }
+
+  // 动态注入 asciinema-player.js（遵守 CSP script-src 'self'），加载完成后回调。
+  // 已加载则立即回调；加载中则排队，避免重复注入。
+  function ensurePlayerLoaded(cb) {
+    if (playerScriptLoaded && typeof AsciinemaPlayer !== "undefined") {
+      cb();
+      return;
+    }
+    playerLoadCbs.push(cb);
+    if (playerScriptLoading) return;
+    playerScriptLoading = true;
+    var s = document.createElement("script");
+    s.src = "/static/vendor/asciinema-player.js";
+    s.onload = function () {
+      playerScriptLoaded = true;
+      playerScriptLoading = false;
+      var cbs = playerLoadCbs;
+      playerLoadCbs = [];
+      for (var i = 0; i < cbs.length; i++) {
+        try { cbs[i](); } catch (e) {}
+      }
+    };
+    s.onerror = function () {
+      playerScriptLoading = false;
+      playerLoadCbs = [];
+      showModal("回放组件加载失败");
+    };
+    document.head.appendChild(s);
+  }
+
+  // 销毁上一个播放器实例（v3 实例带 dispose()，会清空容器内容）。
+  function disposePlayer() {
+    if (playerInstance) {
+      try {
+        if (typeof playerInstance.dispose === "function") playerInstance.dispose();
+      } catch (e) {}
+      playerInstance = null;
+    }
+    if (playbackEl) playbackEl.innerHTML = "";
+  }
+
+  // 打开某条录屏的回放页。
+  function openPlayback(item) {
+    if (!item || item.active) return;
+    currentPlaybackItem = item;
+    showOnly(playbackPanel);
+    if (playbackTitle) {
+      playbackTitle.textContent =
+        "回放：" + (item.username || "") + " / " + (item.mode || "bash");
+    }
+    // 仅审计员可见「显示输入」开关；默认关闭、清空输入面板。
+    if (showInputWrap) showInputWrap.classList.toggle("hidden", !cfg.isAuditor);
+    if (showInputToggle) showInputToggle.checked = false;
+    if (inputPanel) {
+      inputPanel.innerHTML = "";
+      inputPanel.classList.add("hidden");
+    }
+    ensurePlayerLoaded(renderPlayer);
+  }
+
+  // 取 cast 文本并以 {data} 内联模式交给 asciinema-player 播放。
+  // 不使用 Blob URL / {url}：CSP connect-src 'self' 无 blob:，且同源 url 直载
+  // 带不上 Authorization 头，故内联最稳。
+  function renderPlayer() {
+    if (!currentPlaybackItem) return;
+    var sid = currentPlaybackItem.session_id;
+    apiFetch("/api/audit/cast?session=" + encodeURIComponent(sid))
+      .then(function (resp) {
+        if (resp.status === 401) {
+          handleAuthExpired();
+          return null;
+        }
+        if (!resp.ok) {
+          showModal("加载录制失败（HTTP " + resp.status + "）");
+          return null;
+        }
+        return resp.text();
+      })
+      .then(function (text) {
+        if (text === null || text === undefined) return;
+        disposePlayer();
+        try {
+          playerInstance = AsciinemaPlayer.create(
+            { data: text },
+            playbackEl,
+            { autoPlay: false, speed: 1, controls: true }
+          );
+        } catch (e) {
+          showModal("回放器初始化失败");
+        }
+        buildInputPanel(text);
+      })
+      .catch(function () {
+        showModal("网络错误，无法加载录制");
+      });
+  }
+
+  // 解析 asciicast NDJSON，收集 i（input）事件并渲染到输入面板（默认隐藏）。
+  function buildInputPanel(castText) {
+    if (!inputPanel) return;
+    inputPanel.innerHTML = "";
+    if (!castText) return;
+    var lines = castText.split("\n");
+    var entries = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line) continue;
+      var ev;
+      try {
+        ev = JSON.parse(line);
+      } catch (e) {
+        continue;
+      }
+      if (!Array.isArray(ev) || ev.length < 3) continue; // 首行 header 为对象，跳过
+      if (ev[1] !== "i") continue;
+      entries.push({ t: ev[0], data: String(ev[2]) });
+    }
+    if (entries.length === 0) {
+      var empty = document.createElement("div");
+      empty.className = "input-empty";
+      empty.textContent = "（无输入事件，或输入已按策略省略/脱敏）";
+      inputPanel.appendChild(empty);
+      return;
+    }
+    for (var j = 0; j < entries.length; j++) {
+      var row = document.createElement("div");
+      row.className = "input-row";
+
+      var timeEl = document.createElement("span");
+      timeEl.className = "input-time";
+      timeEl.textContent = "[" + formatClock(entries[j].t) + "]";
+      row.appendChild(timeEl);
+
+      var dataEl = document.createElement("span");
+      dataEl.className = "input-data";
+      dataEl.textContent = entries[j].data;
+      row.appendChild(dataEl);
+
+      inputPanel.appendChild(row);
+    }
+  }
+
+  // 下载录屏（审计员专属）：arraybuffer → Blob → a[download] 触发下载。
+  function downloadAudit(sid) {
+    if (!sid) return;
+    apiFetch("/api/audit/download?session=" + encodeURIComponent(sid))
+      .then(function (resp) {
+        if (resp.status === 401) {
+          handleAuthExpired();
+          return null;
+        }
+        if (!resp.ok) {
+          showModal("下载失败（HTTP " + resp.status + "）");
+          return null;
+        }
+        return resp.arrayBuffer();
+      })
+      .then(function (buf) {
+        if (!buf) return;
+        var url = URL.createObjectURL(new Blob([buf]));
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = sid + ".zip";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function () {
+          try { URL.revokeObjectURL(url); } catch (e) {}
+        }, 1000);
+      })
+      .catch(function () {
+        showModal("网络错误，下载失败");
+      });
+  }
+
   // ===== 刷新恢复 =====
 
   // 页面刷新：sessionStorage 有 mgmt_token → 免重登。
@@ -1251,6 +1734,95 @@
   // 上传弹窗「取消上传」：中止当前上传。
   uploadCancel.addEventListener("click", cancelUpload);
 
+  // 审计入口。
+  btnAudit.addEventListener("click", showAudit);
+
+  // 审计列表：用户筛选（审计员）。结果集变化时回到第 1 页。
+  auditFilterBtn.addEventListener("click", function () {
+    auditPage = 1;
+    loadAuditList();
+  });
+  auditUsernameFilter.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      auditPage = 1;
+      loadAuditList();
+    }
+  });
+
+  // 审计列表：日期间隔筛选。结果集变化时回到第 1 页。
+  auditDateFilterBtn.addEventListener("click", function () {
+    auditFromDate = auditDateFrom.value;
+    auditToDate = auditDateTo.value;
+    auditPage = 1;
+    saveAuditPrefs();
+    loadAuditList();
+  });
+  auditDateResetBtn.addEventListener("click", function () {
+    if (auditDateFrom) auditDateFrom.value = "";
+    if (auditDateTo) auditDateTo.value = "";
+    auditFromDate = "";
+    auditToDate = "";
+    auditPage = 1;
+    saveAuditPrefs();
+    loadAuditList();
+  });
+  // 日期输入框回车即触发筛选。
+  auditDateFrom.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      auditDateFilterBtn.click();
+    }
+  });
+  auditDateTo.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      auditDateFilterBtn.click();
+    }
+  });
+
+  // 审计列表：单页行数切换。回到第 1 页并记住偏好。
+  auditPageSizeSel.addEventListener("change", function () {
+    auditPageSize = parseInt(auditPageSizeSel.value, 10) || 10;
+    auditPage = 1;
+    saveAuditPrefs();
+    loadAuditList();
+  });
+
+  // 审计列表：分页上一页 / 下一页。
+  auditPrevBtn.addEventListener("click", function () {
+    if (auditPrevBtn.disabled) return;
+    auditPage = auditPage > 1 ? auditPage - 1 : 1;
+    loadAuditList();
+  });
+  auditNextBtn.addEventListener("click", function () {
+    if (auditNextBtn.disabled) return;
+    auditPage = auditPage + 1;
+    loadAuditList();
+  });
+
+  // 审计列表 → 返回会话面板。
+  btnAuditBack.addEventListener("click", function () {
+    showSessionPanel();
+  });
+
+  // 回放页 → 返回审计列表（释放播放器并重载列表）。
+  btnPlaybackBack.addEventListener("click", function () {
+    disposePlayer();
+    currentPlaybackItem = null;
+    showOnly(auditPanel);
+    loadAuditList();
+  });
+
+  // 输入面板显隐（仅审计员可见该开关）。
+  showInputToggle.addEventListener("change", function () {
+    if (!inputPanel) return;
+    inputPanel.classList.toggle("hidden", !showInputToggle.checked);
+  });
+
+  // 录制明示「知道了」。
+  recordingNoticeOk.addEventListener("click", dismissRecordingNotice);
+
   // ===== 初始化 =====
 
   // 登录入口：无会话且仅 bash 时，直接新建一个临时 bash 会话进入终端。
@@ -1265,6 +1837,7 @@
   }
 
   function init() {
+    applyAuditPrefs();
     var m = loadMgmt();
     if (!m) {
       showLogin();

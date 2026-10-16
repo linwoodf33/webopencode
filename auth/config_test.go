@@ -612,3 +612,338 @@ sandbox:
 		t.Errorf("sandbox.bind_mounts len = %d, want 0", len(cfg.Sandbox.BindMounts))
 	}
 }
+
+func TestLoadConfigAuditDefaults(t *testing.T) {
+	// 未显式设置 audit：enabled 缺省 true，其余各默认值。
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.AuditEnabled {
+		t.Error("audit.enabled should default to true")
+	}
+	if cfg.AuditDir != DefaultAuditDir {
+		t.Errorf("AuditDir = %q, want %q", cfg.AuditDir, DefaultAuditDir)
+	}
+	if !cfg.AuditRecordIn {
+		t.Error("AuditRecordIn should default to true")
+	}
+	if cfg.AuditPasswordMode != DefaultAuditPasswordInput {
+		t.Errorf("AuditPasswordMode = %q, want %q", cfg.AuditPasswordMode, DefaultAuditPasswordInput)
+	}
+	if cfg.AuditPasswordMaskWhen != DefaultAuditPasswordMaskWhen {
+		t.Errorf("AuditPasswordMaskWhen = %q, want %q", cfg.AuditPasswordMaskWhen, DefaultAuditPasswordMaskWhen)
+	}
+	if cfg.AuditMaxBytes != DefaultAuditMaxSessionBytes {
+		t.Errorf("AuditMaxBytes = %d, want %d", cfg.AuditMaxBytes, DefaultAuditMaxSessionBytes)
+	}
+	if cfg.AuditTotalBytes != DefaultAuditMaxTotalBytes {
+		t.Errorf("AuditTotalBytes = %d, want %d", cfg.AuditTotalBytes, DefaultAuditMaxTotalBytes)
+	}
+	if cfg.AuditRetention != DefaultAuditRetention {
+		t.Errorf("AuditRetention = %v, want %v", cfg.AuditRetention, DefaultAuditRetention)
+	}
+	if cfg.AuditCleanupIvl != DefaultAuditCleanupInterval {
+		t.Errorf("AuditCleanupIvl = %v, want %v", cfg.AuditCleanupIvl, DefaultAuditCleanupInterval)
+	}
+	if cfg.AuditFailClosed {
+		t.Error("AuditFailClosed should default to false")
+	}
+	if cfg.AuditTrustProxy {
+		t.Error("AuditTrustProxy should default to false")
+	}
+	if !cfg.AuditUserSelf {
+		t.Error("AuditUserSelf should default to true")
+	}
+	if len(cfg.AuditAdmins) != 0 {
+		t.Errorf("AuditAdmins len = %d, want 0", len(cfg.AuditAdmins))
+	}
+}
+
+func TestLoadConfigAuditEVWDefaults(t *testing.T) {
+	// 未显式设置：password_mask_when 默认 echo_verify，hang 兜底 2000ms、策略 mask，
+	// 严格整块关闭，TUI 门关闭。
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AuditPasswordMaskWhen != "echo_verify" {
+		t.Errorf("AuditPasswordMaskWhen = %q, want echo_verify", cfg.AuditPasswordMaskWhen)
+	}
+	if cfg.AuditEchoVerifyTimeout != 2000*time.Millisecond {
+		t.Errorf("AuditEchoVerifyTimeout = %v, want 2000ms", cfg.AuditEchoVerifyTimeout)
+	}
+	if cfg.AuditEchoVerifyHangPolicy != "mask" {
+		t.Errorf("AuditEchoVerifyHangPolicy = %q, want mask", cfg.AuditEchoVerifyHangPolicy)
+	}
+	if cfg.AuditEchoVerifyStrictBatch {
+		t.Error("AuditEchoVerifyStrictBatch should default to false")
+	}
+	if cfg.AuditEchoVerifyTUI {
+		t.Error("AuditEchoVerifyTUI should default to false")
+	}
+}
+
+func TestLoadConfigAuditEVWExplicit(t *testing.T) {
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+audit:
+  enabled: true
+  password_mask_when: echo_verify_tui
+  echo_verify_hang_ms: 250
+  echo_verify_hang_policy: reached_plain
+  echo_verify_strict_batch: true
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AuditPasswordMaskWhen != "echo_verify_tui" {
+		t.Errorf("AuditPasswordMaskWhen = %q, want echo_verify_tui", cfg.AuditPasswordMaskWhen)
+	}
+	if cfg.AuditEchoVerifyTimeout != 250*time.Millisecond {
+		t.Errorf("AuditEchoVerifyTimeout = %v, want 250ms", cfg.AuditEchoVerifyTimeout)
+	}
+	if cfg.AuditEchoVerifyHangPolicy != "reached_plain" {
+		t.Errorf("AuditEchoVerifyHangPolicy = %q, want reached_plain", cfg.AuditEchoVerifyHangPolicy)
+	}
+	if !cfg.AuditEchoVerifyStrictBatch {
+		t.Error("AuditEchoVerifyStrictBatch should be true")
+	}
+	// echo_verify_tui 判据隐式开启 TUI 门。
+	if !cfg.AuditEchoVerifyTUI {
+		t.Error("echo_verify_tui should imply AuditEchoVerifyTUI=true")
+	}
+}
+
+func TestLoadConfigAuditEVWLegacyKey(t *testing.T) {
+	// 旧键 echo_verify_latency_ms 作为兼容别名，映射到 hang 兜底语义。
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+audit:
+  enabled: true
+  echo_verify_latency_ms: 300
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AuditEchoVerifyTimeout != 300*time.Millisecond {
+		t.Errorf("legacy echo_verify_latency_ms: AuditEchoVerifyTimeout = %v, want 300ms", cfg.AuditEchoVerifyTimeout)
+	}
+	// 旧键未设置时不应影响默认策略。
+	if cfg.AuditEchoVerifyHangPolicy != "mask" {
+		t.Errorf("AuditEchoVerifyHangPolicy = %q, want mask", cfg.AuditEchoVerifyHangPolicy)
+	}
+}
+
+func TestLoadConfigAuditEVWEnumValid(t *testing.T) {
+	// 四个合法判据均应通过校验。
+	for _, v := range []string{"echo_verify", "echo_verify_tui", "echo_off", "echo_off_canonical"} {
+		t.Run(v, func(t *testing.T) {
+			path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+audit:
+  enabled: true
+  password_mask_when: `+v+"\n")
+			if _, err := LoadConfig(path); err != nil {
+				t.Fatalf("enum %q should be valid, got %v", v, err)
+			}
+		})
+	}
+}
+
+func TestLoadConfigAuditExplicit(t *testing.T) {
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+audit:
+  enabled: false
+  dir: "/tmp/audit"
+  record_input: false
+  password_input: omit
+  password_mask_when: echo_off
+  max_session_bytes: "5M"
+  max_total_bytes: "2G"
+  retention_days: 0
+  cleanup_interval: "30m"
+  fail_closed: true
+  trust_proxy: true
+  user_can_view_self: false
+  admins: ["Alice", "AUDITOR"]
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AuditEnabled {
+		t.Error("audit.enabled should be false")
+	}
+	if cfg.AuditDir != "/tmp/audit" {
+		t.Errorf("AuditDir = %q", cfg.AuditDir)
+	}
+	if cfg.AuditRecordIn {
+		t.Error("AuditRecordIn should be false")
+	}
+	if cfg.AuditPasswordMode != "omit" {
+		t.Errorf("AuditPasswordMode = %q", cfg.AuditPasswordMode)
+	}
+	if cfg.AuditPasswordMaskWhen != "echo_off" {
+		t.Errorf("AuditPasswordMaskWhen = %q", cfg.AuditPasswordMaskWhen)
+	}
+	if cfg.AuditMaxBytes != 5<<20 {
+		t.Errorf("AuditMaxBytes = %d, want %d", cfg.AuditMaxBytes, 5<<20)
+	}
+	if cfg.AuditTotalBytes != 2<<30 {
+		t.Errorf("AuditTotalBytes = %d, want %d", cfg.AuditTotalBytes, 2<<30)
+	}
+	if cfg.AuditRetention != 0 {
+		t.Errorf("AuditRetention = %v, want 0 (no cleanup)", cfg.AuditRetention)
+	}
+	if cfg.AuditCleanupIvl != 30*time.Minute {
+		t.Errorf("AuditCleanupIvl = %v, want 30m", cfg.AuditCleanupIvl)
+	}
+	if !cfg.AuditFailClosed || !cfg.AuditTrustProxy {
+		t.Error("AuditFailClosed / AuditTrustProxy should be true")
+	}
+	if cfg.AuditUserSelf {
+		t.Error("AuditUserSelf should be false")
+	}
+	// 白名单小写归一，IsAuditor 大小写不敏感。
+	if !cfg.AuditAdmins["alice"] || !cfg.AuditAdmins["auditor"] {
+		t.Errorf("AuditAdmins = %v, want lowercase keys", cfg.AuditAdmins)
+	}
+	if !cfg.IsAuditor("ALICE") || !cfg.IsAuditor("auditor") {
+		t.Error("IsAuditor should be case-insensitive")
+	}
+	if cfg.IsAuditor("bob") {
+		t.Error("IsAuditor(bob) should be false")
+	}
+}
+
+func TestLoadConfigAuditEnabledExplicitFalse(t *testing.T) {
+	// enabled: false 时不校验枚举（无埋点，零开销）。
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+audit:
+  enabled: false
+  password_input: bogus
+`)
+	if _, err := LoadConfig(path); err != nil {
+		t.Fatalf("disabled audit should skip enum validation, got %v", err)
+	}
+}
+
+func TestLoadConfigAuditInvalidEnum(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		yml  string
+	}{
+		{name: "password_input", yml: "  password_input: bogus\n"},
+		{name: "password_mask_when", yml: "  password_mask_when: bogus\n"},
+		{name: "echo_verify_hang_policy", yml: "  echo_verify_hang_policy: bogus\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+audit:
+  enabled: true
+`+tc.yml)
+			if _, err := LoadConfig(path); err == nil {
+				t.Fatalf("expected error for invalid %s, got nil", tc.name)
+			}
+		})
+	}
+}
+
+func TestParseSize(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		def  int64
+		want int64
+		ok   bool
+	}{
+		{in: "", def: 42, want: 42, ok: true},
+		{in: "100M", want: 100 << 20, ok: true},
+		{in: "20G", want: 20 << 30, ok: true},
+		{in: "1T", want: 1 << 40, ok: true},
+		{in: "512K", want: 512 << 10, ok: true},
+		{in: "100MB", want: 100 << 20, ok: true},
+		{in: "1024", want: 1024, ok: true},
+		{in: "2g", want: 2 << 30, ok: true},
+		{in: "1_000M", want: 1000 << 20, ok: true},
+		{in: "abc", ok: false},
+		{in: "10X", ok: false},
+		{in: "M", ok: false},
+	} {
+		got, err := parseSize(tc.in, tc.def)
+		if tc.ok && err != nil {
+			t.Errorf("parseSize(%q) unexpected error: %v", tc.in, err)
+			continue
+		}
+		if !tc.ok {
+			if err == nil {
+				t.Errorf("parseSize(%q) expected error, got %d", tc.in, got)
+			}
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("parseSize(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestExampleConfigParse(t *testing.T) {
+	// ExampleConfig 必须可直接解析，且 audit 块字段齐全（防示例漂移）。
+	path := writeTempConfig(t, ExampleConfig)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig(ExampleConfig): %v", err)
+	}
+	if !cfg.AuditEnabled {
+		t.Error("ExampleConfig audit.enabled should parse to true")
+	}
+	if cfg.AuditDir != DefaultAuditDir {
+		t.Errorf("ExampleConfig AuditDir = %q, want %q", cfg.AuditDir, DefaultAuditDir)
+	}
+	if !cfg.IsAuditor("alice") || !cfg.IsAuditor("auditor") {
+		t.Errorf("ExampleConfig admins not parsed: %v", cfg.AuditAdmins)
+	}
+}

@@ -1,9 +1,12 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +14,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"webshell/audit"
 	"webshell/pty"
 )
 
@@ -59,7 +63,7 @@ func TestAttachNilProc(t *testing.T) {
 	ls := addLocalSession(mgr, "s1", "alice", "bash", false, clk.now().Add(time.Hour), false)
 
 	ac := &attachedConn{conn: newWSServerConn(t)}
-	if !mgr.Attach(ls, ac) {
+	if !mgr.Attach(ls, ac, audit.ClientInfo{IP: "10.0.0.1"}) {
 		t.Fatal("Attach(proc=nil) should succeed")
 	}
 	if info, ok := ix.Get("s1"); !ok || !info.Attached {
@@ -265,5 +269,233 @@ func TestManagerReaperClosesExpired(t *testing.T) {
 	}
 	if !proc.IsClosed() {
 		t.Error("pty should be closed after reap")
+	}
+}
+
+// TestManagerCreateAuditFailClosed 校验 recFactory 失败且 fail_closed=true 时拒绝
+// 建会话（pty 被关闭、不登记）。
+func TestManagerCreateAuditFailClosed(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	clk := &testClock{t: base}
+	mgr, _ := newTestManager(clk)
+
+	proc := mustPty(t)
+	mgr.SetAudit(func(audit.SessionMeta) (*audit.Recorder, error) {
+		return nil, errors.New("disk full")
+	}, true, true, "mask", "echo_off_canonical", false)
+
+	_, err := mgr.Create(CreateParams{ID: "s1", Username: "u", MaxLong: 3, MaxTotal: 10}, proc)
+	if err == nil {
+		t.Fatal("fail_closed: Create should fail when recorder open fails")
+	}
+	if !proc.IsClosed() {
+		t.Error("proc should be closed on fail-closed rejection")
+	}
+	if mgr.GetLocal("s1") != nil {
+		t.Error("rejected session should not be registered")
+	}
+}
+
+// TestManagerCreateAuditFailOpen 校验 recFactory 失败且 fail_closed=false 时会话
+// 照常建立（rec=nil，fail-open）。
+func TestManagerCreateAuditFailOpen(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	clk := &testClock{t: base}
+	mgr, _ := newTestManager(clk)
+
+	proc := mustPty(t)
+	mgr.SetAudit(func(audit.SessionMeta) (*audit.Recorder, error) {
+		return nil, errors.New("disk full")
+	}, false, true, "mask", "echo_off_canonical", false)
+
+	ls, err := mgr.Create(CreateParams{ID: "s1", Username: "u", MaxLong: 3, MaxTotal: 10}, proc)
+	if err != nil {
+		t.Fatalf("fail-open: Create should succeed, got %v", err)
+	}
+	if ls.rec != nil {
+		t.Error("rec should be nil on fail-open")
+	}
+	mgr.Close("s1")
+}
+
+// newAuditRecorder 在临时目录打开一个真实 recorder（供输入分派测试观察落盘）。
+func newAuditRecorder(t *testing.T, opt audit.Options) (*audit.Recorder, string) {
+	t.Helper()
+	dir := t.TempDir()
+	r, err := audit.Open(dir, audit.SessionMeta{
+		SessionID: "t", Username: "u", Mode: "bash", StartedAt: time.Now(),
+	}, opt)
+	if err != nil {
+		t.Fatalf("audit.Open: %v", err)
+	}
+	return r, dir
+}
+
+// castInputEvents 读取 cast.log 中所有 i 事件的 data。
+func castInputEvents(t *testing.T, dir string) []string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "cast.log"))
+	if err != nil {
+		t.Fatalf("read cast.log: %v", err)
+	}
+	var out []string
+	for _, ln := range strings.Split(string(b), "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" || strings.HasPrefix(ln, "{") {
+			continue
+		}
+		ev, err := audit.ParseEventLine([]byte(ln))
+		if err != nil {
+			continue
+		}
+		if ev.Type == "i" {
+			out = append(out, ev.Data)
+		}
+	}
+	return out
+}
+
+// newDispatchSession 构造一个仅用于输入分派测试的 localSession（proc 为 nil，
+// 通过注入 procState 提供 ECHO/ICANON 状态）。
+func newDispatchSession(rec *audit.Recorder, passwordMode, maskWhen string, echo, canon bool, err error) *localSession {
+	ls := &localSession{
+		id: "s1", username: "u", mode: "bash",
+		rec: rec, recordInput: true, passwordMode: passwordMode, maskWhen: maskWhen,
+	}
+	ls.procState = func() (bool, bool, error) { return echo, canon, err }
+	return ls
+}
+
+// TestRecordInputDispatch 校验 readLoop 输入埋点的三态分派（经 recordInputBlock）。
+func TestRecordInputDispatch(t *testing.T) {
+	opt := audit.Options{RecordInput: true, EchoVerifyTimeout: 100 * time.Millisecond, FlushInterval: time.Hour, FlushThreshold: 1}
+
+	t.Run("echo_on_plaintext", func(t *testing.T) {
+		rec, dir := newAuditRecorder(t, opt)
+		ls := newDispatchSession(rec, "mask", "echo_verify", true, true, nil)
+		ls.recordInputBlock([]byte("secret"))
+		rec.Close("x")
+		if got := castInputEvents(t, dir); len(got) != 1 || got[0] != "secret" {
+			t.Fatalf("echo=on should record plaintext, got %v", got)
+		}
+	})
+
+	// echo=on 但整块含换行（readline 整块读取）：快照不可信赖，交 EVW 走边界窗口；
+	// 回显到达后由边界事件确定关闭窗口 → 明文。
+	t.Run("echo_on_batch_evw_echo_plaintext", func(t *testing.T) {
+		rec, dir := newAuditRecorder(t, opt)
+		ls := newDispatchSession(rec, "mask", "echo_verify", true, true, nil)
+		ls.recordInputBlock([]byte("secret\n")) // 含 \n → EVW deferred
+		rec.WriteOutput([]byte("secret\r\n"))   // 累积回显证据（不关窗）
+		rec.WriteResize(80, 24)                 // 边界事件 → 确定性关窗 → 明文
+		rec.Close("x")
+		if got := castInputEvents(t, dir); len(got) != 1 || got[0] != "secret\n" {
+			t.Fatalf("echo=on batch with echo should be plaintext via EVW, got %v", got)
+		}
+	})
+
+	// echo=on 整块含换行 + strictBatch：一律掩码（严格整块防线）。
+	t.Run("echo_on_strict_batch_masked", func(t *testing.T) {
+		rec, dir := newAuditRecorder(t, opt)
+		ls := newDispatchSession(rec, "mask", "echo_verify", true, true, nil)
+		ls.strictBatch = true
+		ls.recordInputBlock([]byte("secret\n"))
+		rec.Close("x")
+		if got := castInputEvents(t, dir); len(got) != 1 || got[0] != "*******" {
+			t.Fatalf("strict batch echo=on with newline should be masked, got %v", got)
+		}
+	})
+
+	t.Run("echo_off_canonical_masked", func(t *testing.T) {
+		rec, dir := newAuditRecorder(t, opt)
+		ls := newDispatchSession(rec, "mask", "echo_verify", false, true, nil)
+		ls.recordInputBlock([]byte("secret"))
+		rec.Close("x")
+		if got := castInputEvents(t, dir); len(got) != 1 || got[0] != "******" {
+			t.Fatalf("ECHO=off ICANON=on should be masked, got %v", got)
+		}
+	})
+
+	t.Run("raw_echo_off_masked", func(t *testing.T) {
+		rec, dir := newAuditRecorder(t, opt)
+		ls := newDispatchSession(rec, "mask", "echo_off", false, false, nil)
+		ls.recordInputBlock([]byte("secret"))
+		rec.Close("x")
+		if got := castInputEvents(t, dir); len(got) != 1 || got[0] != "******" {
+			t.Fatalf("raw + echo_off should be masked, got %v", got)
+		}
+	})
+
+	t.Run("raw_echo_verify_deferred_echo_plaintext", func(t *testing.T) {
+		rec, dir := newAuditRecorder(t, opt)
+		ls := newDispatchSession(rec, "mask", "echo_verify", false, false, nil)
+		ls.recordInputBlock([]byte("secret"))
+		rec.WriteOutput([]byte("secret")) // 累积回显证据（输出块不关窗）
+		rec.WriteResize(80, 24)           // 边界事件 → 确定性关窗 → 明文
+		rec.Close("x")
+		if got := castInputEvents(t, dir); len(got) != 1 || got[0] != "secret" {
+			t.Fatalf("raw + echo_verify with echo should be plaintext, got %v", got)
+		}
+	})
+
+	t.Run("raw_echo_verify_no_echo_masked", func(t *testing.T) {
+		rec, dir := newAuditRecorder(t, opt)
+		ls := newDispatchSession(rec, "mask", "echo_verify", false, false, nil)
+		ls.recordInputBlock([]byte("secret")) // 无回显，Close 时按掩码结算
+		rec.Close("x")
+		if got := castInputEvents(t, dir); len(got) != 1 || got[0] != "******" {
+			t.Fatalf("raw + echo_verify without echo should be masked, got %v", got)
+		}
+	})
+
+	t.Run("raw_echo_off_canonical_plaintext", func(t *testing.T) {
+		rec, dir := newAuditRecorder(t, opt)
+		ls := newDispatchSession(rec, "mask", "echo_off_canonical", false, false, nil)
+		ls.recordInputBlock([]byte("secret"))
+		rec.Close("x")
+		if got := castInputEvents(t, dir); len(got) != 1 || got[0] != "secret" {
+			t.Fatalf("raw + echo_off_canonical (legacy) should be plaintext, got %v", got)
+		}
+	})
+
+	t.Run("plaintext_mode", func(t *testing.T) {
+		rec, dir := newAuditRecorder(t, opt)
+		ls := newDispatchSession(rec, "plaintext", "echo_verify", false, false, nil)
+		ls.recordInputBlock([]byte("secret"))
+		rec.Close("x")
+		if got := castInputEvents(t, dir); len(got) != 1 || got[0] != "secret" {
+			t.Fatalf("plaintext mode should record plaintext, got %v", got)
+		}
+	})
+
+	t.Run("echo_state_error_no_record", func(t *testing.T) {
+		rec, dir := newAuditRecorder(t, opt)
+		ls := newDispatchSession(rec, "mask", "echo_verify", false, false, errors.New("ioctl failed"))
+		ls.recordInputBlock([]byte("secret"))
+		rec.Close("x")
+		if got := castInputEvents(t, dir); len(got) != 0 {
+			t.Fatalf("echoState error should record nothing, got %v", got)
+		}
+	})
+}
+
+// TestActiveSessionIDs 校验存活会话 ID 快照。
+func TestActiveSessionIDs(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	clk := &testClock{t: base}
+	mgr, _ := newTestManager(clk)
+	addLocalSession(mgr, "a", "u", "bash", false, base.Add(time.Hour), false)
+	addLocalSession(mgr, "b", "u", "bash", false, base.Add(time.Hour), false)
+
+	ids := mgr.ActiveSessionIDs()
+	if len(ids) != 2 {
+		t.Fatalf("ActiveSessionIDs len = %d, want 2", len(ids))
+	}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		seen[id] = true
+	}
+	if !seen["a"] || !seen["b"] {
+		t.Errorf("ActiveSessionIDs = %v, want a,b", ids)
 	}
 }

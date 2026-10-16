@@ -32,6 +32,10 @@ type loginResponse struct {
 	MaxLongSessions int `json:"max_long_sessions"`
 	// MaxTotalSessions 每用户会话总数上限（长+短）。
 	MaxTotalSessions int `json:"max_total_sessions"`
+	// IsAuditor 当前用户是否为审计员（供前端展示审计入口）。
+	IsAuditor bool `json:"is_auditor"`
+	// AuditEnabled 是否启用审计录制（供前端展示录制提示）。
+	AuditEnabled bool `json:"audit_enabled"`
 }
 
 // errorResponse 错误响应体。
@@ -121,6 +125,8 @@ func Login(a *auth.Authenticator, cfg *auth.Config) http.HandlerFunc {
 			MaxSessionTTLHours: cfg.MaxSessionTTLHours,
 			MaxLongSessions:    cfg.MaxLongN,
 			MaxTotalSessions:   cfg.MaxTotalN,
+			IsAuditor:          cfg.IsAuditor(username),
+			AuditEnabled:       cfg.AuditEnabled,
 		})
 	}
 }

@@ -1,14 +1,17 @@
 package handler
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 
+	"webshell/audit"
 	"webshell/protocol"
 	"webshell/pty"
 )
@@ -38,6 +41,18 @@ type localSession struct {
 
 	proc *pty.Session
 
+	// rec 是本会话的审计录制器（nil 表示审计禁用）；所有调用均在锁外。
+	rec *audit.Recorder
+	// 审计输入录制参数（Create 时从 manager 拷贝；控制输入事件与脱敏，§3.4）。
+	recordInput  bool   // 是否录制输入（copy of manager.SetAudit 参数）
+	passwordMode string // mask|omit|plaintext
+	maskWhen     string // echo_verify(默认)|echo_verify_tui|echo_off_canonical|echo_off
+	strictBatch  bool   // echo=on 且整块含换行时一律掩码（copy of manager.strictBatch）
+
+	// procState 是读取 pty ECHO/ICANON 状态的接缝：Create 时默认绑定
+	// proc.EchoState；单测可替换为桩以验证 readLoop 三态分派。
+	procState func() (echo, canonical bool, err error)
+
 	mu      sync.Mutex
 	closed  bool
 	conn    *attachedConn
@@ -49,6 +64,75 @@ func (ls *localSession) isClosed() bool {
 	ls.mu.Lock()
 	defer ls.mu.Unlock()
 	return ls.closed
+}
+
+// echoState 通过可注入接缝读取 pty 的 ECHO/ICANON 状态。
+// procState 为 nil（如手工构造的 localSession）时回退直接查询 proc；proc 亦为 nil
+// 时返回错误（调用方按 err 分支不录输入）。
+func (ls *localSession) echoState() (echo, canonical bool, err error) {
+	if ls.procState != nil {
+		return ls.procState()
+	}
+	if ls.proc == nil {
+		return false, false, fmt.Errorf("localSession %s: no pty", ls.id)
+	}
+	return ls.proc.EchoState()
+}
+
+// recordInputBlock 是 TypeInput 的审计埋点三态分派（锁外、写 pty 前）：
+//
+//	echo=on             → 内核必回显 → 明文；但整块读取可能夹带残留 echo=on 的
+//	                      明文（如逐键 read -s 末尾 printback），故对含换行的整块
+//	                      启用防线（见下）；
+//	echo=off && canon=on → getpass 型 → 掩码；
+//	echo=off && canon=off（raw）→ 按 maskWhen：
+//	    echo_off            严格：全掩码；
+//	    echo_off_canonical  遗留：明文（明确披露不支持 raw TUI 密码）；
+//	    echo_verify/_tui    EVW：WriteInputDeferred 边界窗口结算；
+//	echoState 读取失败    → 最安全：本块不录。
+//
+// 重要：本函数必须在 proc.Write 之前调用。窗口方案的前提是「下一个输入块到达」先于
+// 其回显 output 产生——即 Enter 关闭窗口发生在内核 printback 之前。
+//
+// echo=on 整块防线：readline 一次读取的整块（含 \n）在快照 echo=on 下看似可信，
+// 但可能夹带前一次 read -s 的 printback 明文；故不能整块信赖快照：
+//   - EVW 判据且非严格：整块交 EVW 走边界窗口验证（快照不可信赖）；
+//   - 严格整块：含换行一律掩码（宁枉勿纵）；
+//   - 否则（逐键/无 \n）：快照可信，按明文记。
+func (ls *localSession) recordInputBlock(input []byte) {
+	if ls.rec == nil || !ls.recordInput {
+		return
+	}
+	if ls.passwordMode == "plaintext" {
+		ls.rec.WriteInput(input)
+		return
+	}
+	echo, canon, err := ls.echoState()
+	switch {
+	case err != nil:
+		// 状态读取失败：最安全，本块不录输入。
+	case echo:
+		hasNL := bytes.Contains(input, []byte{0x0A})
+		switch {
+		case hasNL && (ls.maskWhen == "echo_verify" || ls.maskWhen == "echo_verify_tui") && !ls.strictBatch:
+			ls.rec.WriteInputDeferred(input)
+		case hasNL && ls.strictBatch:
+			ls.rec.WriteInputMasked(len(input))
+		default:
+			ls.rec.WriteInput(input)
+		}
+	case canon:
+		ls.rec.WriteInputMasked(len(input))
+	default:
+		switch ls.maskWhen {
+		case "echo_off":
+			ls.rec.WriteInputMasked(len(input))
+		case "echo_off_canonical":
+			ls.rec.WriteInput(input)
+		default: // echo_verify / echo_verify_tui
+			ls.rec.WriteInputDeferred(input)
+		}
+	}
 }
 
 // writeTo 向指定连接写一条 output 消息（持 ac.writeMu，不持会话锁）。
@@ -64,6 +148,10 @@ func (ls *localSession) writeTo(ac *attachedConn, data []byte) {
 
 // sendOutput 把 pty 输出分发给当前附着的连接；若无连接则积压等待重连后冲刷。
 func (ls *localSession) sendOutput(data []byte) {
+	// 审计埋点置于入口（无论是否附着），覆盖 detach 期间的后台输出；锁外调用。
+	if ls.rec != nil {
+		ls.rec.WriteOutput(data)
+	}
 	ls.mu.Lock()
 	if ls.closed {
 		ls.mu.Unlock()
@@ -114,6 +202,11 @@ func (ls *localSession) readLoop(ac *attachedConn) {
 			if input == nil {
 				continue
 			}
+			// 审计输入埋点必须在 proc.Write 之前：Enter 关闭 EVW 窗口须先于内核
+			// printback 产生（边界窗口方案的前提）。锁外三态分派（§3.4 修订）。
+			if ls.proc != nil {
+				ls.recordInputBlock(input)
+			}
 			if _, err := ls.proc.Write(input); err != nil {
 				return
 			}
@@ -122,7 +215,11 @@ func (ls *localSession) readLoop(ac *attachedConn) {
 			if !ok {
 				continue
 			}
-			_ = ls.proc.Resize(size.Cols, size.Rows)
+			if err := ls.proc.Resize(size.Cols, size.Rows); err == nil {
+				if ls.rec != nil {
+					ls.rec.WriteResize(size.Cols, size.Rows)
+				}
+			}
 		default:
 		}
 	}
@@ -138,6 +235,10 @@ type CreateParams struct {
 	// MaxLong / MaxTotal 为名额上限（<=0 表示不限制），用于索引内二次校验。
 	MaxLong  int
 	MaxTotal int
+	// Client 是本次创建的来源信息（IP/UA），用于审计 meta。
+	Client audit.ClientInfo
+	// AuthProvided 是启动前补全的 auth 环境变量名清单（仅变量名，绝不含值）。
+	AuthProvided []string
 }
 
 // SessionManager 持有本节点的 pty 与子进程（不可序列化），并配合 memoryIndex
@@ -152,6 +253,20 @@ type SessionManager struct {
 	// closeProc 是 pty.Session.Close 的调用接缝：生产为直接 Close；单测可替换为
 	// 阻塞桩，用以验证「索引先移除、proc.Close 后执行」的时序（close 步骤 ③/⑤）。
 	closeProc func(*pty.Session)
+
+	// recFactory 审计录制器工厂接缝：nil 表示审计禁用。生产由 main 注入（内部
+	// 调用 audit.Open）；单测可替换为内存桩。与 closeProc 接缝风格一致。
+	recFactory func(meta audit.SessionMeta) (*audit.Recorder, error)
+	// failClosed recFactory 失败时是否拒绝建会话（audit.fail_closed）。
+	failClosed bool
+	// recordInput 是否录制输入事件（audit.record_input）。
+	recordInput bool
+	// passwordMode ECHO 关闭时输入处理：mask|omit|plaintext。
+	passwordMode string
+	// maskWhen 脱敏判据：echo_verify(默认)|echo_verify_tui|echo_off_canonical|echo_off。
+	maskWhen string
+	// strictBatch echo=on 且整块含换行时一律掩码（严格整块防线）。
+	strictBatch bool
 }
 
 // NewManager 创建一个会话管理器，并与索引互相接线（索引 reaper 到期回调 Close）。
@@ -204,6 +319,33 @@ func (m *SessionManager) GetLocal(id string) *localSession {
 	return m.local[id]
 }
 
+// ActiveSessionIDs 返回本地存活会话 ID 快照（mgrMu 内快进快出），供审计清扫
+// 排除仍在写入的会话。
+func (m *SessionManager) ActiveSessionIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]string, 0, len(m.local))
+	for id := range m.local {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// SetAudit 装配审计录制。recFactory 为 nil 表示审计禁用；failClosed 决定工厂
+// 失败时是否拒绝建会话；recordInput/passwordMode/maskWhen 控制输入录制与脱敏；
+// strictBatch 控制 echo=on 整块含换行时是否一律掩码。
+func (m *SessionManager) SetAudit(recFactory func(meta audit.SessionMeta) (*audit.Recorder, error),
+	failClosed bool, recordInput bool, passwordMode, maskWhen string, strictBatch bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recFactory = recFactory
+	m.failClosed = failClosed
+	m.recordInput = recordInput
+	m.passwordMode = passwordMode
+	m.maskWhen = maskWhen
+	m.strictBatch = strictBatch
+}
+
 // Create 登记一个已创建好的 pty 会话（pty 由调用方在无锁状态下先建）。
 //
 // 时序：indexMu 内 Add（原子二次校验名额，超额不写入）→ mgrMu 登记 local →
@@ -228,7 +370,38 @@ func (m *SessionManager) Create(p CreateParams, proc *pty.Session) (*localSessio
 		ExpireAt:  expireAt,
 		Attached:  false,
 	}
+
+	// 审计录制器在锁外、index.Add 之前尝试打开（避免持 indexMu/mgrMu 做文件 I/O）。
+	var rec *audit.Recorder
+	if m.recFactory != nil {
+		meta := audit.SessionMeta{
+			SessionID:    p.ID,
+			Username:     p.Username,
+			Mode:         p.Mode,
+			LongLived:    p.LongLived,
+			CreatedAt:    now,
+			ExpireAt:     expireAt,
+			StartedAt:    now,
+			Client:       p.Client,
+			AuthProvided: p.AuthProvided,
+		}
+		r, rerr := m.recFactory(meta)
+		if rerr != nil {
+			if m.failClosed {
+				proc.Close()
+				return nil, fmt.Errorf("audit recorder open failed: %w", rerr)
+			}
+			log.Printf("audit: recorder open failed for session %s (fail-open, recording disabled): %v", p.ID, rerr)
+		} else {
+			rec = r
+		}
+	}
+
 	if err := m.index.Add(info, p.MaxLong, p.MaxTotal); err != nil {
+		// 超额：若录制器已打开，先收尾避免残留无主目录，再关闭 pty。
+		if rec != nil {
+			rec.Close("session rejected")
+		}
 		proc.Close()
 		return nil, err
 	}
@@ -240,7 +413,15 @@ func (m *SessionManager) Create(p CreateParams, proc *pty.Session) (*localSessio
 		longLived: p.LongLived,
 		createdAt: now,
 		proc:      proc,
+		rec:       rec,
+
+		recordInput:  m.recordInput,
+		passwordMode: m.passwordMode,
+		maskWhen:     m.maskWhen,
+		strictBatch:  m.strictBatch,
 	}
+	// procState 默认绑定本会话 pty；读时 proc 已就绪。单测可覆盖为桩。
+	ls.procState = func() (bool, bool, error) { return ls.proc.EchoState() }
 	m.mu.Lock()
 	m.local[p.ID] = ls
 	m.mu.Unlock()
@@ -256,7 +437,8 @@ func (m *SessionManager) Create(p CreateParams, proc *pty.Session) (*localSessio
 // （rows-1 → 延时 → 真实尺寸），复用 resize→SIGWINCH 通路，兼容 bash/opencode 等 TUI。
 // R4 合规：绝不持 sMu/indexMu/mgrMu 做 pty ioctl。
 // 返回 false 表示会话已关闭（已向新连接发送 close 并关闭）。
-func (m *SessionManager) Attach(ls *localSession, ac *attachedConn) bool {
+// client 为本次连接的来源信息，仅用于审计 attach 事件。
+func (m *SessionManager) Attach(ls *localSession, ac *attachedConn, client audit.ClientInfo) bool {
 	ls.mu.Lock()
 	if ls.closed {
 		ls.mu.Unlock()
@@ -274,6 +456,10 @@ func (m *SessionManager) Attach(ls *localSession, ac *attachedConn) bool {
 	ls.mu.Unlock()
 
 	m.index.setAttached(ls.id, true)
+	// 审计时间线：attach（锁外，纯内存 + 异步落盘）。
+	if ls.rec != nil {
+		ls.rec.Event("attach", map[string]any{"ip": client.IP})
+	}
 
 	// 若已存在旧连接（如刷新时新旧短暂重叠），关闭旧连接，避免重复写。
 	if old != nil && old != ac {
@@ -317,6 +503,10 @@ func (m *SessionManager) Detach(ls *localSession, ac *attachedConn) {
 		return
 	}
 	m.index.setAttached(ls.id, false)
+	// 审计时间线：detach（锁外）。
+	if ls.rec != nil {
+		ls.rec.Event("detach", nil)
+	}
 	if !ls.longLived {
 		m.index.Update(ls.id, m.clock().Add(defaultShortTTL))
 	}
@@ -339,6 +529,14 @@ func (m *SessionManager) Detach(ls *localSession, ac *attachedConn) {
 //
 // 绝不持锁做网络写或 pty.Close。
 func (m *SessionManager) Close(id string) bool { return m.close(id, "session closed") }
+
+// Shutdown 优雅停机：遍历本地会话，逐个以 reason 终止（幂等；用于录屏结束态落盘）。
+// 与 Close 并存：仅多出可自定义 reason 的入口，复用内部 close 的六步收敛。
+func (m *SessionManager) Shutdown(reason string) {
+	for _, id := range m.ActiveSessionIDs() {
+		m.close(id, reason)
+	}
+}
 
 func (m *SessionManager) close(id, reason string) bool {
 	// ①
@@ -377,6 +575,12 @@ func (m *SessionManager) close(id, reason string) bool {
 	// ⑤ 锁外 proc.Close()（若 proc != nil；同步执行、不异步化）。
 	if ls.proc != nil && m.closeProc != nil {
 		m.closeProc(ls.proc)
+	}
+
+	// ⑤.5 审计录制收尾：置于步骤⑤（proc.Close）之后——此时 pump 已因 EOF 退出，
+	// 无并发写；rec.Close 幂等、flush 尾部并落 ended_at/end_reason。
+	if ls.rec != nil {
+		ls.rec.Close(reason)
 	}
 
 	// ⑥

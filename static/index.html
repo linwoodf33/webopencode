@@ -7,6 +7,8 @@
 
   <!-- xterm.js（自托管，随二进制内嵌，无 CDN） -->
   <link rel="stylesheet" href="/static/vendor/xterm.css">
+  <!-- asciinema-player 回放样式（自托管；JS 不常驻，回放时按需注入） -->
+  <link rel="stylesheet" href="/static/vendor/asciinema-player.css">
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
@@ -43,6 +45,7 @@
         <h1>会话管理</h1>
         <div id="session-user"></div>
         <div id="session-counts"></div>
+        <button type="button" id="btn-audit" class="hidden" title="查看录屏审计">审计</button>
         <button type="button" id="btn-logout">登出</button>
       </div>
 
@@ -67,6 +70,69 @@
         <div id="new-error"></div>
       </div>
     </div>
+  </div>
+
+  <!-- 审计录屏列表面板 -->
+  <div id="audit-panel" class="hidden">
+    <div id="audit-box">
+      <div id="audit-header">
+        <h1>审计录屏</h1>
+        <div id="audit-user-filter" class="hidden">
+          <input id="audit-username-filter" type="text" placeholder="按用户名筛选（留空=全部）" autocomplete="off">
+          <button type="button" id="audit-filter-btn">筛选</button>
+        </div>
+        <button type="button" id="btn-audit-back">返回</button>
+      </div>
+      <div id="audit-filters">
+        <div id="audit-date-filter">
+          <input id="audit-date-from" type="date">
+          <span id="audit-date-sep">至</span>
+          <input id="audit-date-to" type="date">
+          <button type="button" id="audit-date-filter-btn">筛选</button>
+          <button type="button" id="audit-date-reset-btn">重置</button>
+        </div>
+        <div id="audit-page-size-wrap">
+          <label for="audit-page-size">每页</label>
+          <select id="audit-page-size">
+            <option value="10" selected>10</option>
+            <option value="20">20</option>
+            <option value="30">30</option>
+            <option value="50">50</option>
+          </select>
+          <span>条</span>
+        </div>
+        <div id="audit-pagination">
+          <button type="button" id="audit-prev-btn">上一页</button>
+          <span id="audit-page-info"></span>
+          <button type="button" id="audit-next-btn">下一页</button>
+        </div>
+      </div>
+      <div id="audit-list"></div>
+      <div id="audit-empty" class="hidden">暂无录屏记录。</div>
+    </div>
+  </div>
+
+  <!-- 录屏回放面板 -->
+  <div id="playback-panel" class="hidden">
+    <div id="playback-box">
+      <div id="playback-toolbar">
+        <span id="playback-title">回放</span>
+        <div id="playback-actions">
+          <span id="show-input-wrap" class="hidden">
+            <label><input type="checkbox" id="show-input-toggle"> 显示输入</label>
+          </span>
+          <button type="button" id="btn-playback-back">返回</button>
+        </div>
+      </div>
+      <div id="playback"></div>
+      <div id="input-panel" class="hidden"></div>
+    </div>
+  </div>
+
+  <!-- 录制明示横条（默认隐藏，首次进入终端/审计页时展示） -->
+  <div id="recording-notice" class="hidden">
+    <span id="recording-notice-text">本会话的输入输出将被记录用于审计；终端所见(output)将原样留存，密码输入按终端行为脱敏。</span>
+    <button type="button" id="recording-notice-ok">知道了</button>
   </div>
 
   <!-- 终端工具条 + 终端容器 -->

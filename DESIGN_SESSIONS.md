@@ -131,12 +131,12 @@ type localSession struct {
 
 `mgmt_token` 是 8h 的用户级 bearer，若被 XSS 窃取可完全接管该用户全部终端（= 以该用户执行命令）。缓解措施：
 
-1. **前端依赖自托管**：xterm.js / addon-fit 已随二进制 `//go:embed` 内嵌，实体位于 `static/vendor/`（`xterm.css` / `xterm.js` / `addon-fit.js`），消除 CDN 投毒/中间人窃取路径。
+1. **前端依赖自托管**：xterm.js / addon-fit / asciinema-player 已随二进制 `//go:embed` 内嵌，实体位于 `static/vendor/`（`xterm.css` / `xterm.js` / `addon-fit.js` / `asciinema-player.js` / `asciinema-player.css`），消除 CDN 投毒/中间人窃取路径。
 2. **CSP（最终裁决，逐字节）**：
    ```
-   default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+   default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
    ```
-   禁止内联脚本、不引入外部脚本，`Cache-Control: no-store` 保持。`style-src` 放行 `'unsafe-inline'` 的原因：vendored xterm.js 运行时通过 `document.createElement("style")` 动态注入样式，严格 `style-src 'self'` 会拦截致终端渲染异常；脚本面仍 `'self'` 封闭，XSS 增量低。内联 `style=""` 已改为 `.hidden` class；运行时动态样式与 CSSOM 赋值（如 `el.style.width=`）本不受 `style-src` 限制。
+   禁止内联脚本、不引入外部脚本，`Cache-Control: no-store` 保持。`style-src` 放行 `'unsafe-inline'` 的原因：vendored xterm.js 运行时通过 `document.createElement("style")` 动态注入样式，严格 `style-src 'self'` 会拦截致终端渲染异常；脚本面追加 `'wasm-unsafe-eval'`（仅放行 WASM 编译，用于回放器 asciinema-player 内嵌的 VT 渲染，**不放开任意 eval/内联脚本**），XSS 增量低。内联 `style=""` 已改为 `.hidden` class；运行时动态样式与 CSSOM 赋值（如 `el.style.width=`）本不受 `style-src` 限制。
 3. 前端一律用 `textContent`/`createElement` 渲染动态内容（现有代码已是如此，继续保持，禁 `innerHTML` 拼用户串）。
 4. 可选增强：mgmt_token 改为 **HttpOnly + Secure + SameSite=Lax Cookie**（JS 不可读），配合 CSRF token；WS/HTTP 依赖 Cookie。代价是 CSRF 防护与多标签共享，需评估。**基线方案（1-3）先行**。
 5. ticket 一次性、60s，写 URL 可接受。

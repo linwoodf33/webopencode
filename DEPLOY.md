@@ -239,6 +239,19 @@ sandbox:
   http_proxy: "http://proxy.example.com:8080"   # http 代理地址；非空时注入沙箱环境变量（小写+大写）
   https_proxy: "http://proxy.example.com:8080"  # https 代理地址；非空时注入沙箱环境变量（小写+大写）
   no_proxy: "localhost,127.0.0.1,::1,10.195.86.188,10.195.86.54,cae-chatbot.yanfeng.com"  # 不走代理的主机/域名
+
+audit:
+  enabled: true                       # 启用审计录制（部署前需预创建 dir 并 chown 给服务运行用户，见下方「审计配置与数据目录」）
+  dir: "/var/log/webshell/audit"      # 录制根目录（服务用户可写）
+  record_input: true
+  password_input: mask
+  password_mask_when: echo_verify
+  max_session_bytes: "100M"
+  max_total_bytes: "20G"
+  retention_days: 90
+  cleanup_interval: "1h"
+  user_can_view_self: true
+  admins: ["alice", "auditor"]        # 审计员白名单（账号名，大小写不敏感）
 EOF
 chown ease:ease /opt/webshell_sandbox1/config.yaml
 chmod 600 /opt/webshell_sandbox1/config.yaml
@@ -263,6 +276,22 @@ chmod 600 /opt/webshell_sandbox1/config.yaml
 - `sandbox.enabled=false`：退回传统 sudo 直连（不叠加沙箱隔离）
 - **`/etc/ssl/certs`**：把宿主 CA 证书目录 bind 进沙箱，解决沙箱内 HTTPS 失败（curl 报 `(77) error setting certificate file`、codex 报 "waiting for network"）。**沙箱内 opencode/codex 联网必需**；未 bind 时沙箱 rootfs 缺少 CA 证书，所有 HTTPS 请求都会失败。
 - **`/share/apps/.opencode` 与 `/share/apps/.codex-standalone`**：把宿主 opencode/codex 目录 bind 进沙箱（方案 B），沙箱直接读取宿主版本；更新版本只需替换宿主文件，无需拷贝 rootfs（详见「更新 opencode / codex 版本」）。注意 bind 后沙箱内（登录用户身份）对这些目录**可写**（未做只读 remount），实际以只读方式执行，风险低。
+
+### 3. 审计（audit）配置与数据目录
+
+启用审计（`audit.enabled: true`）时，需先创建录制根目录并授权给服务运行用户（示例为 `ease`）：
+
+```bash
+mkdir -p /var/log/webshell/audit
+chown ease:ease /var/log/webshell/audit
+chmod 0700 /var/log/webshell/audit
+```
+
+- **必须预创建**：服务启动时会做目录可写自检，目录不存在或无写权限会直接报错退出（日志含 `store root not writable` 之类），不会自动降级。
+- **属主=服务用户**：审计目录 0700、文件 0600，仅服务运行用户可读写；登录用户无权删改（审计数据只读）。
+- **审计员白名单**：`audit.admins` 填账号名列表（大小写不敏感）；仅白名单账号的「审计」页显示用户名筛选与「下载」按钮。
+- **只读与清理**：无任何人工删除入口；数据按 `retention_days`（会话结束时间）与 `max_total_bytes`（最旧优先）由后台自动清理。
+- **回放前端无需单独部署**：asciinema-player 等前端资源已内嵌进二进制（`//go:embed static/`），无需拷贝静态文件，也无外网依赖。
 
 ---
 
@@ -489,6 +518,8 @@ systemctl enable webshell-cgroup.service
 | 沙箱启动报 `build rootfs: bind ...: too many levels of symbolic links` | autofs 子路径（NFS 挂载点）空闲卸载；新 mount namespace 内首次访问触发 autofs 报 ELOOP | 升级到含 `warmHostPaths`（unshare 前于宿主 ns 预热所有 bind 源）的 `sandbox-init` |
 | 沙箱内 `whoami` 报 `cannot find name for user ID`、`ls -l` 显示数字 UID | rootfs 缺 `libnss_sss.so.2`，或未 bind `/var/lib/sss/pipes` / `/var/lib/sss/mc` | 见「六、5 AD 名称解析」；用对应系统的 `build_rootfs_*.sh` 重建 |
 | 沙箱内 opencode 报 `libpthread.so.0: cannot open shared object file` | rootfs 缺 opencode 动态库 | 用对应系统的 `build_rootfs_*.sh`（已含 `libpthread/libdl/librt`）重建 rootfs |
+| 启动失败，日志含 `store root not writable` | 审计目录不存在或属主非服务用户 | 按「五·3」创建 `/var/log/webshell/audit` 并 `chown ease:ease; chmod 0700` |
+| 审计页空白 / 看不到下载按钮 | 未启用审计，或登录用户不在 `audit.admins` | 检查 `audit.enabled` 与 `audit.admins` 白名单 |
 
 ---
 
@@ -502,6 +533,8 @@ systemctl enable webshell-cgroup.service
 - [ ] 沙箱内 `/etc` 只读（pivot_root + 只读 rootfs）
 - [ ] seccomp 拦截 mount/unshare/setns/新版挂载 API 等
 - [ ] cgroup 限制 memory/cpu/pids 生效
+- [ ] 审计目录 `/var/log/webshell/audit` 属主为服务用户、权限 0700，登录用户不可删改
+- [ ] 审计数据无人工删除入口，仅按保留期/配额自动清理
 
 ---
 

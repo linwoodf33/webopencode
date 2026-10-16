@@ -1,6 +1,6 @@
 # 终端会话审计录制设计方案（DESIGN_AUDIT）
 
-> 状态：方案设计（关键决策已确认，见 §15，待实施；2026-10 评审修订版）
+> 状态：已实施并合入 main（2026-10）。本文档与实现对照，含 EVW 脱敏、CSP、输入面板等最终结论。
 > 关联需求：记录用户在 Web 终端上的**输入/输出**，形成可回放的「录屏」，用于事后审计（谁、何时、从哪、在哪个会话里做了什么）。
 > 关联模块：`handler/*`、`pty/*`、`auth/*`、`static/*`、`main.go`
 > 关联文档：`DESIGN_SESSIONS.md`（会话模型/锁层级/凭证）、`DESIGN_TASK.md`（批处理任务，暂不在本文范围）
@@ -125,17 +125,23 @@ asciicast 无「注释」能力，故**审计元数据与时间线单独落 `met
 - **管理事件亦入 timeline**：`upload`（上传不经 pty，需在 `handler/upload.go` 显式补记）、`extend`/`close-req`（`handler/session_api.go`）、`auth-provided`（仅记变量名清单，**不含 key 内容**；发生在 rec.Open 之前，由 ws.go 暂存、Create 时随 meta 落盘）。
 - `client.ip` 取 Upgrade 时的 `r.RemoteAddr`；反代场景可选信任 `X-Forwarded-For`（§5，默认关闭）。
 
-### 3.4 输入脱敏（依据终端 ECHO 信号）
+### 3.4 输入脱敏（EVW 回显验证窗口）
 
 **问题**：终端在密码提示下「看不见输入」，是内核 line discipline 依据 pty 的 `ECHO` 标志不把输入回显到 master（因此不进 output）。但浏览器发来的输入字节仍原样写入 pty，若直接录制会**明文落盘密码**。
 
-**方案：用内核 `ECHO` 标志作为权威脱敏信号**。判据与内核决定「是否回显」用的是同一个标志，因此能精确对齐终端行为：
+**方案：EVW（Echo Verify Window，回显验证窗口）——默认判据 `password_mask_when: echo_verify`。** 不依赖单一时刻读取 termios 标志（读取与实际回显之间存在竞态），改为**用「output 是否回显了该输入」反推输入是否可见**：
 
-- 录制输入前，读取 pty master 的 termios（`c_lflag`）；`ECHO=0` 即「终端此刻不显示输入」。
-- **仅当 `ECHO=0 && ICANON=1` 时脱敏**（`password_input.mask_when: echo_off_canonical`，默认）：
-  - `getpass()`/`sudo`/`ssh`/`passwd` 等密码提示均为「关 echo、保留行缓冲（ICANON）」——精确命中；
-  - **raw 模式 TUI**（opencode/codex/vim/less 等，`ICANON=0`）不属于密码场景，**不脱敏**，正常录入审计，避免误伤。
-  - 可选严格模式 `echo_off`（只要 `ECHO=0` 即脱敏），覆盖极少数关 echo 且关 ICANON 的密码程序。
+- **pending 队列**：raw 输入块到达时**先入 pending 队列，不立即定论**。
+- **观察窗口** = `[输入块到达, 下一个输入块/边界事件)`：窗口内扫描后续 output，若观察到待判定可打印字节的回显 → 判定**明文**；否则窗口关闭时判**掩码**。
+- **边界事件**：下一个输入块、resize、Enter/换行、EOF、Close。
+  - `read -s` 逐键输入：每键到达即关闭上一窗口（上一键无回显 → 掩码）→ **逐键掩码**；同时新键开启新窗口。
+  - `read` 等明文可见输入：有回显 → **明文**。
+  - `echo=on` 且整块含换行：交由 `echo_verify_strict_batch`（默认 false）决定——开启时整块一律掩码。
+- **hang 兜底**：窗口久不关闭（如末尾无后续事件）时，超过 `echo_verify_hang_ms`（默认 2000ms）按 `echo_verify_hang_policy`（`mask` 默认 | `reached_plain`）结算，避免末尾字符被 Enter 后 printback 误判明文。**Close 收尾一律强制掩码**，不残留明文。
+- **TUI 门**：`echo_verify_tui`（`password_mask_when: echo_verify_tui` 判据或 `echo_verify_tui: true` 开关）启用 alt-screen 门——扫描 output，进入 alt-screen（`ESC[?1049/1047/47 h`）后输入**直接明文**，离开（`l`）后恢复窗口判定。用于避免全屏 TUI 因无逐键回显而被误掩码。
+- **历史判据**：`echo_off_canonical`（仅 `ECHO=off && ICANON=on` 掩码，raw 不脱敏）、`echo_off`（严格，`ECHO=off` 即掩码）**保留但非默认**。枚举全量：`echo_verify | echo_verify_tui | echo_off_canonical | echo_off`。
+
+> **raw TUI 不误伤**：opencode/codex/vim 等 raw 模式 TUI 的按键通常被应用回显（重绘屏幕），EVW 观察到回显即判明文，不会误伤；与旧 `echo_off_canonical` 判据「raw 不脱敏」的精神一致。
 
 **处理策略**（配置 `password_input`，默认 `mask`）：
 
@@ -145,12 +151,12 @@ asciicast 无「注释」能力，故**审计元数据与时间线单独落 `met
 | `omit` | 完全不写该输入块（最贴近终端——终端什么都不显示） | 是 |
 | `plaintext` | 原样录制（合规需要可恢复密码时的逃生口，需显式开启并提示风险） | 否 |
 
-- 脱敏按**输入块**判定：浏览器逐键发送，`readLoop` 每次收到输入时即时查询 `EchoState()`，因此密码逐键均被脱敏；提示符结束、程序恢复 `ECHO` 后立即停止脱敏。
+- 脱敏按**观察窗口**判定：逐键输入逐键掩码，明文块整块明文；掩码与明文不混块。
 - 掩码保留**按键次数与节奏**（审计可推断"输入了 N 个字符"），但不含内容；同时在 `meta.json` 记录 `masked_input_events` 计数，供审计快速定位。
-- **对回放的影响**：`i` 事件内容被掩码即天然不可恢复；「显示输入」的可行性以 §8.2 spike 结论为准（player 很可能忽略 `i`，需自建输入面板），无论如何掩码内容不泄露；配合「回放侧默认不显示 input」，双重保护。
+- **对回放的影响**：`i` 事件内容被掩码即天然不可恢复；**已确认 player 忽略 `i`，需自建输入面板**（见 §8.2），无论如何掩码内容不泄露；配合「回放侧默认不显示 input」，双重保护。
 - **api_key 无关**：`auth-request/auth-response` 不经 pty（§4），本机制与其互补，覆盖交互 shell 内的密码提示。
 
-**实现**（新增 `pty.Session.EchoState`，`golang.org/x/sys/unix` 已是直接依赖，`sandbox/sandbox.go:36` 已在用）：
+**实现**（`pty.Session.EchoState` 仍保留，用于读取 pty 回显/规范模式状态与历史判据；`golang.org/x/sys/unix` 已是直接依赖，`sandbox/sandbox.go:36` 已在用）：
 
 ```go
 // pty/session.go
@@ -172,9 +178,9 @@ func (s *Session) EchoState() (echo, canonical bool, err error) {
 }
 ```
 
-`readLoop` 埋点改为：查 `EchoState()` → 命中脱敏条件则 `rec.WriteInputMasked(len(input))`，否则 `rec.WriteInput(input)`。termios 查询为轻量 ioctl，在无锁、写 pty 前完成，不影响既有锁层级（R1–R4）。
+`readLoop` 埋点：输入到达即入 EVW pending 队列（recorder 记录待判定输入），output 侧在 `WriteOutput` 时一并扫描回显完成判定，Close 时收尾强制掩码。termios 查询（`EchoState()`）为轻量 ioctl，用于历史判据与调试，在无锁、写 pty 前完成，不影响既有锁层级（R1–R4）。
 
-> **边界说明**：若程序自行打印 `*`（少数实现），输出侧本就显示星号，与本机制无冲突；`ECHO=0` 期间程序主动回显原文属异常实现，不在覆盖范围。输入块与 echo 状态切换的竞态窗口极小（最多丢失/多记最后一个 `\n`，非敏感）。**已知盲区**：raw 模式 TUI（`ICANON=0`）内的密码/密钥输入**不脱敏**（如 TUI 内嵌表单），默认判据不覆盖；需更严格时用 `password_mask_when=echo_off`（§10）。
+> **边界说明**：若程序自行打印 `*`（少数实现），输出侧本就显示星号，与本机制无冲突。**已知盲区**：完全无回显且无边界事件的输入由 hang 兜底处理——`echo_verify_hang_ms`（默认 2000ms）后按 `echo_verify_hang_policy`（默认 `mask`）结算，默认掩码不落明文。
 
 ---
 
@@ -186,7 +192,7 @@ func (s *Session) EchoState() (echo, canonical bool, err error) {
 |---|---|---|
 | 会话创建 | `SessionManager.Create`（`handler/manager.go:212`） | `recorder.Open(id, username, mode, clientInfo)`，写 `meta.json`，记 `open` |
 | pty 输出 | `localSession.sendOutput`（`handler/manager.go:66`）**入口** | `rec.WriteOutput(data)` —— 无论是否附着都录（含 detach 期后台输出） |
-| 客户端输入 | `localSession.readLoop` TypeInput（`handler/manager.go:112`） | 查 `proc.EchoState()` 判定脱敏（§3.4）：命中则 `rec.WriteInputMasked(len)`，否则 `rec.WriteInput(input)` |
+| 客户端输入 | `localSession.readLoop` TypeInput（`handler/manager.go:112`） | 输入入 EVW pending 队列（§3.4）：由 output 回显扫描裁定明文/掩码，Close 收尾强制掩码 |
 | 窗口尺寸 | `localSession.readLoop` TypeResize（`handler/manager.go:120`） | `rec.WriteResize(cols,rows)` |
 | 附着 | `SessionManager.Attach`（`handler/manager.go:259`） | 记 `attach` + 来源 IP |
 | 分离 | `SessionManager.Detach`（`handler/manager.go:308`） | 记 `detach` |
@@ -302,6 +308,7 @@ type ClientInfo struct { IP, ForwardedFor, UserAgent string }
 - 归属判定：普通用户强制 `target==self`；审计员可显式指定 `username`（缺省全部）。
 - 越权一律 `404`（防枚举），与既有会话接口一致（`handler/session_api.go:175`）。
 - `/api/login` 响应新增 `is_auditor` 字段（`handler/login.go`），供前端决定是否展示审计入口；权限判定以服务端为准，前端仅作展示控制。
+- `/api/login` 响应**新增 `audit_enabled` 字段**（`handler/login.go`，审计是否启用）。前端以 `audit_enabled || is_auditor` 决定是否展示「审计」入口（`static/app.js` `syncAuditButton`），亦据 `audit_enabled` 决定是否弹出「录制明示」提示。
 
 ### 7.3 用户本人可见性
 
@@ -320,24 +327,24 @@ type ClientInfo struct { IP, ForwardedFor, UserAgent string }
 
 ### 8.2 回放器实现（引入 asciinema-player，自托管）
 
-回放采用 **asciinema-player**。其原生消费 asciicast v2（与 §3 录制格式同源），播放/暂停/倍速/进度/全屏/快捷键/`startAt` 开箱即用，避免自写回放器的状态机与 seek 复杂度。与现有前端依赖一致的强制约束：**必须自托管**（`//go:embed` 内嵌，禁止 CDN，满足 CSP `script-src 'self'`，`main.go:57`、`DESIGN_SESSIONS.md` §4.3）：
+回放采用 **asciinema-player**（实测版本 3.17.0）。其原生消费 asciicast v2（与 §3 录制格式同源），播放/暂停/倍速/进度/全屏/快捷键/`startAt` 开箱即用，避免自写回放器的状态机与 seek 复杂度。与现有前端依赖一致的强制约束：**必须自托管**（`//go:embed` 内嵌，禁止 CDN，满足 CSP `script-src 'self' 'wasm-unsafe-eval'`，`main.go:63`、`DESIGN_SESSIONS.md` §4.3）：
 
 - 新增 `static/vendor/asciinema-player.js` 与 `static/vendor/asciinema-player.css`（来源 npm `asciinema-player`）；比照 `DESIGN_SESSIONS.md` §16 的 vendor 校验流程记录版本 + SHA-256，并去除官方文件末尾的 `sourceMappingURL` 注释。
-- CSP：脚本面仍 `script-src 'self'`；player 运行时若动态注入 `<style>`，现有 `style-src 'self' 'unsafe-inline'`（`main.go:57`，为 vendored xterm 已放行）足以覆盖；样式优先随 `.css` 静态引入。**不得**为 player 放宽脚本面。
+- **CSP（最终结论）**：`main.go` 的 CSP 为 `script-src 'self' 'wasm-unsafe-eval'`。player 内嵌 WASM 做 VT 渲染（`WebAssembly.instantiate`），会被 `'self'` 拦截并抛 `CompileError`，故在 `script-src` 追加 wasm 编译放行关键字 `'wasm-unsafe-eval'`。该关键字**不放开任意 eval/内联脚本**，增量面小，脚本面整体保持封闭。player 运行时若动态注入 `<style>`，现有 `style-src 'self' 'unsafe-inline'`（`main.go:63`，为 vendored xterm 已放行）足以覆盖；样式优先随 `.css` 静态引入。
 - 回放页按需加载 player（仅在打开审计回放时加载），不影响主终端页首屏。
 
 数据通路：
 
 ```
 loadCast(session) → GET /api/audit/cast?session=… 返回 asciicast NDJSON 原文
-  → 前端取得 cast 文本（{data} 内联）或同源 URL
-  → AsciinemaPlayer.create(src, container, { speed, startAt, autoPlay, rows, cols })
-    （API 形态以实际引入的 player 版本为准，v3 为 AsciinemaPlayer.create(src, el, opts)）
+  → 前端取得 cast 文本（{data} 内联）
+  → AsciinemaPlayer.create({ data: text }, el, { autoPlay: false, speed: 1, controls: true })
+    （player v3 为 AsciinemaPlayer.create(src, el, opts)）
 ```
 
-- **`i`（input）事件支持需 spike 验证**：web 版 asciinema-player 很可能只渲染 `o`/`m`/`r`、直接忽略 `i`（此前「输入叠加配置」的说法存疑）。落地 P3 前先做 spike；若确认忽略，则「显示输入」改为**自建输入面板**——从 cast 解析 `i` 事件，在播放器旁按时间轴对齐渲染，默认隐藏、审计员显式开启。无论何种形态，**回放侧默认不显示 input**（§11）不变。
+- **`i`（input）事件支持已 spike 结论**：web 版 asciinema-player 3.17.0 **只渲染 `o`/`m`/`r`、直接忽略 `i`**（此前「输入叠加配置」的说法被证伪）。故「显示输入」采用**自建输入面板**并已落地：前端解析 cast NDJSON 收集 `i` 事件，按时间轴对齐渲染，默认隐藏、仅审计员勾选「显示输入」查看。**回放侧默认不显示 input**（§11）不变。
 - resize 事件由 player 依据 `r` 自适应；header 的 `width/height` 仅作初值。
-- **加载方式（CSP 约束）**：`connect-src 'self'` **不含 `blob:`**，禁止前端用 Blob URL 交给 player（其内部 fetch 会被拦截）。统一使用**同源 URL 直载**（`/api/audit/cast?...`，`AsciinemaPlayer.create({url}, …)`）或 `{data: <cast 文本>}` 内联模式。
+- **加载方式（CSP 约束）**：`connect-src 'self' ws: wss:` **不含 `blob:`**，且同源 URL 直载带不上 `Authorization` 头，故禁止用 Blob URL、不用 `{url}`。实现统一使用 **`{data: <cast 文本>}` 内联模式**（前端先经 `apiFetch(/api/audit/cast?session=…)` 取原文再内联交给 player）。
 - **大文件**：P0 整段加载；超阈值（如 >20MB）时 P2 引入服务端预处理（关键帧 + 分段，配合 §9 的 `t_from/t_to` 与 `startAt`）。
 
 ### 8.3 明示录制
@@ -373,7 +380,12 @@ audit:
   record_input: true                  # 是否录制输入事件（"i"，默认开启用于取证）；false 仅录 output/resize
                                       # 注：回放侧默认不显示 input，需审计员显式开启（§8.2）
   password_input: mask                # ECHO 关闭时的输入处理：mask（默认，等长掩码）| omit（不记）| plaintext（明文，慎用）
-  password_mask_when: echo_off_canonical  # 脱敏判据：echo_off_canonical（默认，精确命中密码提示）| echo_off（严格）
+  password_mask_when: echo_verify     # 脱敏判据：echo_verify（默认，EVW 输入间边界窗口）| echo_verify_tui（EVW + alt-screen TUI 门）| echo_off_canonical（遗留）| echo_off（严格）
+  echo_verify_hang_ms: 2000           # EVW hang 兜底时长（毫秒）；窗口未被下一输入/边界关闭时按 hang 策略结算
+  echo_verify_hang_policy: mask       # hang 兜底策略：mask（默认，一律掩码）| reached_plain（已观测到回显者记明文）
+  echo_verify_strict_batch: false     # echo=on 且整块含换行时一律掩码（严格整块，默认 false）
+  echo_verify_tui: false              # 是否启用 alt-screen TUI 门（echo_verify_tui 判据会隐式开启）
+  # echo_verify_latency_ms: 已废弃（兼容别名），按 hang 兜底语义读取
   max_session_bytes: "100M"           # 单会话 cast 上限
   max_total_bytes: "20G"              # 总量配额（最旧优先清理）
   retention_days: 90                  # 保留期（按 ended_at 判定，0 表示不自动清理）
@@ -391,7 +403,11 @@ AuditEnabled   bool
 AuditDir       string
 AuditRecordIn  bool
 AuditPasswordMode string // mask|omit|plaintext
-AuditPasswordMaskWhen string // echo_off_canonical|echo_off
+AuditPasswordMaskWhen string // echo_verify|echo_verify_tui|echo_off_canonical|echo_off
+AuditEchoVerifyTimeout time.Duration // EVW hang 兜底时长（echo_verify_hang_ms）
+AuditEchoVerifyHangPolicy string // mask|reached_plain
+AuditEchoVerifyStrictBatch bool
+AuditEchoVerifyTUI bool
 AuditMaxBytes  int64
 AuditTotalBytes int64
 AuditRetention time.Duration
@@ -408,7 +424,7 @@ AuditAdmins    map[string]bool
 
 | 风险 | 措施 |
 |---|---|
-| **密码泄露** | **依据内核 `ECHO` 标志自动脱敏（§3.4）**：`sudo`/`ssh`/`passwd` 等关 echo 的密码提示，输入按 `password_input: mask`（默认）记等长掩码、不落明文，与终端「看不见」行为对齐；raw 模式 TUI 不误伤。逃生口 `omit`（不记）/`plaintext`（需显式开启）。已知盲区：raw 模式 TUI 内的密码输入默认不脱敏（§3.4），可用 `password_mask_when=echo_off` 收紧 |
+| **密码泄露** | **依据 EVW（回显验证窗口）自动脱敏（§3.4，默认 `password_mask_when: echo_verify`）**：`sudo`/`ssh`/`passwd` 等关 echo 的密码提示在观察窗口内无回显 → 判掩码，输入按 `password_input: mask`（默认）记等长掩码、不落明文，与终端「看不见」行为对齐；raw 模式 TUI 因有回显不误伤。历史判据 `echo_off_canonical`（仅 `ECHO=off && ICANON=on`）降为可选项，`echo_off` 为严格模式。逃生口 `omit`（不记）/`plaintext`（需显式开启）。已知盲区：**完全无回显且无边界事件的输入由 hang 兜底默认掩码**（`echo_verify_hang_ms` 后结算） |
 | **api_key 泄露** | `api_key` 走独立 WS 消息（`auth-request/auth-response`）不经 pty，天然不入 cast（§4）；与 §3.4 互补；header `env` 白名单杜绝敏感变量进 cast header（§3.2） |
 | **output 含敏感信息** | 录屏等同终端所见，**output 侧无法脱敏**（`cat 密码文件`/`echo $SECRET` 的输出原样落盘）；属录屏审计固有属性，在 §8.3 用户提示中一并告知 |
 | 回放侧输入可见性 | **默认不显示 input**（§8.2）；即便显示，密码块也已是掩码（§3.4），双重保护。仍提供 `record_input=false` 彻底关闭输入录制 |
@@ -433,8 +449,15 @@ AuditAdmins    map[string]bool
 | resize | `r` 事件写入，回放器应用尺寸 |
 | 磁盘满 / 写失败 | 终端不受影响；`dropped_events>0`；无 panic |
 | `record_input=false` | 无 `i` 事件 |
-| 密码提示下输入（`ECHO=0 && ICANON=1`） | cast 中该输入为**等长掩码**（或 `omit` 时缺失），**无明文**；`masked_input_events` 计数正确 |
-| raw 模式 TUI 输入（`ICANON=0`） | 不脱敏，正常录入 |
+| `read -s` 逐键密码输入（EVW） | 每键无回显 → 逐键**掩码**；cast 中为等长掩码、**无明文**；`masked_input_events` 计数正确 |
+| `read` 明文可见输入（EVW） | 窗口内观察到回显 → 判**明文**，正常录入 |
+| 无回显整块粘贴（EVW） | 粘入整块无回显 → 整块**掩码** |
+| `echo=on` 整块含换行（`echo_verify_strict_batch`） | 默认 false 时按回显判明文；置 true 时整块**一律掩码** |
+| EVW hang 兜底（`echo_verify_hang_policy`） | 窗口超 `echo_verify_hang_ms` 未关闭：`mask`（默认）一律掩码 / `reached_plain` 已观测回显者记明文 |
+| EVW Close 收尾 | 会话 Close 时未决 pending 一律**强制掩码**，不残留明文 |
+| EVW TUI 门（`echo_verify_tui`） | 进入 alt-screen（`ESC[?1049/1047/47 h`）后输入直接明文；离开（`l`）后恢复窗口判定 |
+| raw 模式 TUI 输入（有应用回显） | EVW 观察到回显 → 判明文，不误伤 |
+| `password_mask_when=echo_off_canonical` | 历史判据：`ECHO=0 && ICANON=1` 掩码；raw 不脱敏 |
 | `password_mask_when=echo_off` | `ECHO=0` 即脱敏（含关 ICANON 情形） |
 | `EchoState()` 单测 | termios `c_lflag` 读取正确（echo/canonical）；需 Linux pty 环境（与现有 pty 测试同约束） |
 | pty 输出跨块截断多字节字符 | 跨块重组后为单一完整字符，无块边界假 `\ufffd` |
@@ -445,8 +468,13 @@ AuditAdmins    map[string]bool
 | meta.json 原子写/损坏容错 | temp+rename 原子替换；损坏 meta 按「缺 `ended_at`」补写 |
 | cast/download 活跃会话 | 409（不允许回放/下载进行中会话）；meta 仍可读 |
 | cast 切片 time 平移 | 窗口内时间从 0 起，`startAt=0` 可播 |
-| player 对 `i` 事件（spike） | 记录结论并回填 §8.2；若忽略则自建输入面板生效 |
-| CSP 集成：player 加载 | 同源 URL / `{data}` 模式加载成功，无 CSP 拦截 |
+| player 对 `i` 事件（spike） | **结论已确认**：asciinema-player 3.17.0 忽略 `i` → 自建输入面板生效 |
+| 前端：审计列表筛选/分页 | 日期筛选（from_date/to_date）+ 分页（offset/limit）正确；单页行数可选 10–50 |
+| 前端：审计列表偏好持久化 | `localStorage` 键 `webshell.auditPrefs` 记住 pageSize/from/to；**页码不持久化** |
+| 前端：active 行按钮 | active（进行中）会话行**无回放/下载按钮** |
+| CSP 集成：player 加载 | `AsciinemaPlayer.create({data}, …)` 在 `script-src 'self' 'wasm-unsafe-eval'` 下加载成功，WASM 实例化无拦截（无 CompileError） |
+| 权限：登录字段与入口显隐 | `/api/login` 返回 `audit_enabled`/`is_auditor`；前端以 `audit_enabled \|\| is_auditor` 决定审计入口显隐 |
+| 权限：`user_can_view_self=false` | 普通用户本人访问 self 端点亦 404（仅审计员可看） |
 | `rec.Open` 失败（fail-open/closed） | 默认会话照常建立并告警；`fail_closed=true` 时拒绝创建 |
 | api_key 补全流程 | cast 中**无** api_key 明文 |
 | 普通用户查他人录屏 | 404 |
@@ -478,13 +506,13 @@ AuditAdmins    map[string]bool
 | `handler/ws.go` | Upgrade 前采集 `ClientInfo`（IP/UA，`handler/ws.go:65`），传入 Create/Attach；`auth-provided` 暂存（rec 创建前）随 meta 落盘 |
 | `handler/upload.go` | 上传成功后 `rec.Event("upload", {file, dest})`（§4） |
 | `handler/session_api.go` | `extend`/`close-req` 操作补记 timeline（§4） |
-| `handler/login.go` | 响应新增 `is_auditor` 字段（§7.2） |
+| `handler/login.go` | 响应新增 `is_auditor` 与 `audit_enabled` 字段（§7.2） |
 | `handler/audit_api.go`（新增） | 列表/meta/cast/download + `RequireAuditor`；cast/download 对活跃会话 409（无 delete 端点） |
 | `auth/config.go` | 新增 `audit:` 配置与派生值；`ExampleConfig` 同步 |
 | `config.example.yaml` | 同步 `audit:` 块 |
 | `main.go` | 构造 audit store/recorder，注入 manager；注册审计路由；启动清扫 goroutine；**新增优雅停机（signal + 先逐会话 `Close` + `srv.Shutdown`）** |
 | `static/vendor/asciinema-player.js` / `asciinema-player.css`（新增） | 自托管 asciinema-player（`//go:embed`，去 `sourceMappingURL`，记录版本 + SHA-256） |
-| `static/index.html` / `static/app.js` / `static/css/style.css` | 审计入口、列表页、asciinema-player 回放页（含自建输入面板，如 spike 结论需要）、录制提示 |
+| `static/index.html` / `static/app.js` / `static/css/style.css` | 审计入口、列表页、asciinema-player 回放页（含自建输入面板）、录制提示 |
 | `static_embed.go` | 内嵌新增 vendor 文件 |
 | `README.md` / `USER_GUIDE.md` | 文档同步 |
 
@@ -494,11 +522,11 @@ AuditAdmins    map[string]bool
 
 | 阶段 | 内容 | 依赖 |
 |---|---|---|
-| **P0** | `audit` 包：recorder（asciicast v2 写入 + `WriteInputMasked` + 跨块 UTF-8 重组 + 异步落盘 + 丢弃计数）+ 单测 | 无 |
-| **P1** | `pty.Session.EchoState`（§3.4）；`handler/manager.go` 埋点接入（output/input[含脱敏判据]/resize + open/attach/detach/close[步骤⑤后] + upload/extend 事件）；`ws.go` 采集 `ClientInfo`；`Create` 接缝（fail-open/closed + 失败路径清理） | P0 |
-| **P2** | `audit/store` + 清扫（保留期/配额/单会话上限/排除活跃）；**main.go 优雅停机 + 启动巡检补写残留 cast 结束态（§6.3）**；审计 API + `RequireAuditor`；配置项 | P1 |
-| **P3** | **spike：验证 asciinema-player 对 `i` 事件支持（结论回填 §8.2）**；前端：审计入口、列表、**自托管 asciinema-player 回放页**（含自建输入面板，如需）、录制提示 | P2 |
-| **P4** | 权限与合规收尾：`user_can_view_self`、下载取证、审计访问日志（可选）、文档与验收测试 | P2,P3 |
+| **P0**（已实施） | `audit` 包：recorder（asciicast v2 写入 + `WriteInputMasked` + 跨块 UTF-8 重组 + 异步落盘 + 丢弃计数）+ 单测 | 无 |
+| **P1**（已实施） | `pty.Session.EchoState`（§3.4）；`handler/manager.go` 埋点接入（output/input[含脱敏判据]/resize + open/attach/detach/close[步骤⑤后] + upload/extend 事件）；`ws.go` 采集 `ClientInfo`；`Create` 接缝（fail-open/closed + 失败路径清理） | P0 |
+| **P2**（已实施） | `audit/store` + 清扫（保留期/配额/单会话上限/排除活跃）；**main.go 优雅停机 + 启动巡检补写残留 cast 结束态（§6.3）**；审计 API + `RequireAuditor`；配置项 | P1 |
+| **P3**（已完成） | **spike（已完成）：asciinema-player 忽略 `i` → 自建输入面板落地**；前端：审计入口、列表、**自托管 asciinema-player 回放页**（含自建输入面板）、录制提示 | P2 |
+| **P4**（已实施） | 权限与合规收尾：`user_can_view_self`、下载取证、审计访问日志（可选）、文档与验收测试 | P2,P3 |
 | **P5（可选）** | 大文件关键帧/分段优化 + `startAt`；AD 组作为审计员来源；hash 链防抵赖；base64 扩展字段（字节级保真，偏离标准） | P4 |
 | **下一版本** | **实时直播**：审计员实时观看在线会话（见 §15） | P4 |
 
@@ -508,13 +536,15 @@ AuditAdmins    map[string]bool
 
 以下决策已评审确认，作为实施依据：
 
-1. **回放格式**：采用 **asciicast v2 录制 + 引入 asciinema-player** 回放。player 必须自托管（`//go:embed`，去 CDN，记录版本 + SHA-256），脚本面 CSP 保持 `script-src 'self'` 不放宽；cast 加载仅用**同源 URL 或 `{data}` 内联**，**禁用 Blob URL**（`connect-src 'self'` 不含 `blob:`）；player 对 `i` 事件的支持以 §8.2 spike 结论为准（若忽略则自建输入面板）。
+1. **回放格式与 CSP**：采用 **asciicast v2 录制 + 引入 asciinema-player（3.17.0）** 回放。player 必须自托管（`//go:embed`，去 CDN，记录版本 + SHA-256）；最终 CSP 为 **`script-src 'self' 'wasm-unsafe-eval'`**（追加 wasm 编译放行关键字以允许 player 内嵌 WASM 做 VT 渲染，不放开任意 eval/内联，增量面小）；cast 加载仅用 **`{data}` 内联**（实现经 `apiFetch(/api/audit/cast?session=…)` 取原文），**禁用 Blob URL**（`connect-src 'self' ws: wss:` 不含 `blob:`）。player 对 `i` 事件**已确认忽略**（3.17.0 不渲染 `i`）→ 采用**自建输入面板**。
 2. **输入录制默认值**：`record_input` **默认开启**（完整取证）；回放侧**默认不显示 input**，由审计员显式开启查看（§8.2、§11）。
 3. **审计员来源**：起步使用**配置用户名白名单** `audit.admins`（最小改动，§7.1）；AD 组作为后续可选来源。
 4. **持久化与清理**：会话不跨重启存活；**`main.go` 新增优雅停机**（signal + 先逐会话 `Close("server shutdown")` + `srv.Shutdown` 兜底）；崩溃/强杀后的残留 cast 由**启动巡检补写结束态**（§6.3）。保留期/配额清扫照常（排除活跃会话）。
 5. **实时直播**：**下一版本**再实现（审计员实时观看在线会话，需在 `Attach` 时广播一份只读副本）。本版本不做，列为 P5 之后独立迭代。
-6. **密码脱敏**：采用**内核 `ECHO` 标志**作为判据（`ECHO=0 && ICANON=1` 精确命中密码提示，raw 模式 TUI 不误伤），`password_input` **默认 `mask`**（等长掩码、不落明文），对齐终端「看不见」行为；提供 `omit`/`plaintext` 逃生口（§3.4）。
+6. **密码脱敏**：采用 **EVW（回显验证窗口）** 作为判据（`password_mask_when: echo_verify` **默认**）——raw 输入先入 pending 队列，观察窗口 `[输入块到达, 下一输入块/边界事件)` 内观察到回显则明文、否则掩码；`read -s` 逐键掩码，`read` 明文可见输入判明文；窗口久不关闭按 hang 兜底（`echo_verify_hang_ms` 2000ms + `echo_verify_hang_policy: mask`），Close 收尾强制掩码；alt-screen TUI 门由 `echo_verify_tui` 控制。`echo_off_canonical`（旧默认）与 `echo_off` 保留为历史/严格选项。`password_input` **默认 `mask`**（等长掩码、不落明文），提供 `omit`/`plaintext` 逃生口（§3.4）。
 7. **rec.Open 失败语义**：默认 **fail-open**（照常开会话 + 告警 + 计数）；提供 `audit.fail_closed` 开关供合规收紧（§4、§10）。
 8. **rec.Close 时序**：置于会话 close 六步的**步骤⑤（proc.Close）之后**；recorder 并发安全、Close 后写入丢弃、meta 原子写（§4、§4.1、§6.3）。
 9. **output 不脱敏**：录屏等同终端所见，output 侧不做脱敏，在用户提示中明示（§8.3、§11）。
 10. **审计数据只读**：**不提供任何人工删除能力**（移除 `POST /api/audit/delete` 端点、`Store.Delete`、前端「删除」按钮），清理仅由保留期/总量配额自动执行（§6.2）；**active（进行中）会话不可回放/下载**——`/api/audit/cast`、`/api/audit/download` 对 active 返回 `409 {"error":"active session"}`，前端亦不渲染「回放」「下载」按钮；`/api/audit/meta` 保持对 active 可读以展示状态（§7.2、§9）。
+11. **输入面板为最终形态**：asciinema-player 3.17.0 不渲染 `i`（input）事件，故「显示输入」由**前端自建输入面板**承担——解析 cast NDJSON 收集 `i` 事件、按时间轴对齐渲染、默认隐藏、仅审计员勾选「显示输入」查看（§8.2）。
+12. **登录字段与列表偏好**：`/api/login` 响应含 `is_auditor` 与 **`audit_enabled`**，前端以 `audit_enabled || is_auditor` 决定审计入口显隐（§7.2）；审计列表偏好持久化于 `localStorage` 键 `webshell.auditPrefs`（仅 `pageSize` 与 `from`/`to` 日期间隔，**页码不持久化**）。

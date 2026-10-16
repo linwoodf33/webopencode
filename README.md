@@ -6,13 +6,13 @@
 
 - 语言：Go
 - 终端：xterm.js（浏览器端）+ `creack/pty`（服务端伪终端）
-- 认证：AD（LDAPS）+ 一次性 token
+- 认证：AD（LDAPS）+ mgmt_token（会话级操作）+ 一次性 ticket（WebSocket 接入）
 - 通信：WebSocket（JSON 消息协议）
 
 ## 功能特性
 
 - **AD 登录认证**：通过 LDAPS 连接域控，支持账号名或邮箱登录；可开启密码强认证（用户 DN + 密码 bind）。
-- **一次性 token**：登录成功签发一次性 token（默认 5 分钟有效），WebSocket 升级前校验并消费，防重放。
+- **会话凭证（P1）**：登录签发可复用的 mgmt_token（默认 8 小时，绑定用户名，用于会话/审计等所有 HTTP 操作）；建立 WebSocket 前经 /api/session/ticket 换取 60 秒一次性 ticket（防重放、一次性消费，action=create|attach）。
 - **会话模式选择**：登录成功后，若启用了 opencode 或 codex，前端展示「打开 Bash / 打开 OpenCode / 打开 Codex」选择面板；用户选择后才建立终端连接。
 - **opencode 集成**：选择 opencode 后，以登录用户身份在其家目录启动 opencode TUI；退出 opencode 即完全结束会话（不退回 bash）。
 - **codex 集成**：选择 codex 后，以登录用户身份在其家目录启动 codex TUI（经 `sudo -n -E -u <user> -i bash -c 'cd <home> && <codexPath>'`）；退出 codex 即完全结束会话（不退回 bash）。
@@ -28,27 +28,48 @@
 - **/etc/resolv.conf 映射**：`bind_resolv` 可将宿主机 `/etc/resolv.conf` 映射进沙箱，解决沙箱内域名无法解析（`network: full` 时生效最佳）。
 - **代理支持**：`http_proxy` / `https_proxy` / `no_proxy` 非空时注入沙箱进程环境变量（小写+大写两套），沙箱内网络请求可走代理（需 `network: full` 沙箱有外部网络）。
 - **沙箱内体验**：中文正常（`LANG=en_US.utf8`）、真实用户名提示符、vim（rootfs 内）、opencode / codex（rootfs 内 + 共享配置同步）均可用。
+- **会话审计录制**：长期会话的 pty 输入/输出录制为 asciicast v2（NDJSON），落盘 `<audit_dir>/<username>/<sessionID>/{meta.json, cast.log}`（目录 0700 / 文件 0600）；detach 期后台输出同样录制；写盘失败降级丢弃不阻塞终端。
+- **密码输入脱敏（EVW）**：`record_input` 与 `password_input: mask|omit|plaintext`；判据 `password_mask_when` 默认 `echo_verify`（回显验证窗口：raw 输入先待定，窗内观察到回显记明文、否则掩码，`echo_verify_hang_ms`/`echo_verify_hang_policy` 兜底，`echo_verify_strict_batch`/`echo_verify_tui` 门）。逐键 `read -s` 密码块掩码、普通可见输入明文、整块粘贴盲区按策略处理。
+- **审计员与权限**：审计员白名单 `audit.admins`（大小写不敏感）；登录响应含 `is_auditor`/`audit_enabled`；普通用户可看本人录屏（`user_can_view_self`）；审计数据只读。
+- **审计 API（只读）**：`GET /api/audit/sessions|meta|cast|download`（均 `Bearer mgmt_token`；download 仅审计员；active 会话 cast/download 返回 409，meta 可读）。
+- **回放与输入面板**：自托管 asciinema-player 3.17.0（`static/vendor/`，SHA-256 见 VENDORS.md）；player 不渲染输入事件，故自建「显示输入」面板（默认隐藏、仅审计员）；CSP 需 `script-src 'self' 'wasm-unsafe-eval'`（player 内嵌 WASM）。
+- **审计列表 UI**：日期间隔筛选 + offset/limit 分页（页码「第 X / Y 页 · 共 N 条」、行数 10/20/30/50，localStorage `webshell.auditPrefs` 记住 pageSize/from/to）；active 行显示「进行中」且无回放/下载按钮。
+- **录制明示与运维**：首次进入终端/审计页展示「本会话输入输出将被记录用于审计」横条；优雅停机（先逐会话 Close 再 srv.Shutdown）、保留期/配额自动清理、启动巡检 ScanAndFinalize。
 
 ## 目录结构
 
 ```
 .
-├── main.go                  # 入口：配置加载、路由注册、静态资源托管、服务启动
+├── main.go                  # 入口：配置加载、路由注册、静态资源托管、服务启动（含 CSP）
 ├── static_embed.go          # //go:embed 内嵌 static/ 到二进制
 ├── config.example.yaml      # 配置示例（复制为 config.yaml 使用）
 ├── DEPLOY.md                # 部署指南（Ubuntu + RHEL，含沙箱部署）
+├── DESIGN_AUDIT.md          # 会话审计设计文档（asciicast 录制/脱敏/回放/权限）
 ├── go.mod / go.sum          # Go 模块依赖
-├── auth/                    # AD 认证、token、配置加载
+├── auth/                    # AD 认证、会话凭证、配置加载
 │   ├── ad.go                # AD(LDAPS) 连接与认证
-│   ├── auth.go              # 认证流程（正则/非root/系统存在/AD/token）
-│   ├── config.go            # config.yaml 解析与默认值
-│   └── token.go             # 一次性 token 存储（内存、线程安全）
+│   ├── auth.go              # 认证流程（正则/非root/系统存在/AD）
+│   ├── auth_file.go         # api_key 存取（{env:VAR} / env_key 提取与补全）
+│   ├── config.go            # config.yaml 解析与默认值（含 audit 块）
+│   ├── mgmt.go              # mgmt_token 存储（可复用、绑定用户名、线程安全）
+│   └── ticket.go            # 一次性 ticket 存储（60s、防重放、action=create|attach）
 ├── handler/                 # HTTP 与 WebSocket 处理器
+│   ├── index.go             # 会话索引/元数据/TTL/巡检回收
+│   ├── manager.go           # 会话管理器（create/attach/close + 录屏埋点）
+│   ├── session_api.go       # /api/session/* REST（ticket/extend/close）
+│   ├── audit_api.go         # 审计只读 API（sessions/meta/cast/download）+ RequireAuditor
+│   ├── auth_flow.go         # opencode/codex api_key 补全（auth-request/response）
 │   ├── login.go             # POST /api/login
-│   ├── ws.go                # /ws WebSocket（token 校验、模式选择、会话启动/恢复）
-│   └── session_hub.go       # 会话仓库（刷新后恢复同一终端、过期回收）
+│   ├── upload.go            # 文件上传
+│   └── ws.go                # /ws WebSocket（ticket 校验、模式选择、会话启动/恢复）
+├── audit/                   # 会话审计录制（asciicast v2）
+│   ├── recorder.go          # 录制写入/EVW 脱敏/异步落盘
+│   ├── store.go             # 列表/读取/切片/清扫/启动巡检
+│   └── cast.go              # NDJSON 编解码/按时间切片
 ├── pty/
-│   └── session.go           # pty 会话管理、sudo 启动、opencode 配置同步
+│   ├── session.go           # pty 会话管理、sudo/沙箱启动、opencode/codex 配置同步
+│   ├── echo_linux.go        # Linux termios ECHO/ICANON 查询（供脱敏）
+│   └── echo_other.go        # 非 Linux 占位
 ├── sandbox/                 # Linux 沙箱隔离（方案 A：真实用户身份 + 保留补充组）
 │   ├── sandbox.go           # 沙箱启动逻辑（enterCgroup、buildRootFS、seccomp、降权）
 │   ├── userns_init.c        # C 辅助程序（单线程 unshare/ns 创建，root 执行，需 gcc 编译）
@@ -56,9 +77,14 @@
 ├── protocol/
 │   └── message.go           # WebSocket 消息编解码
 ├── static/                  # 前端资源（内嵌）
-│   ├── index.html           # 登录面板、模式选择面板、终端工具条与终端容器
-│   ├── app.js               # 前端逻辑（登录、WS、xterm、字号/主题、会话恢复）
-│   └── css/style.css        # 样式
+│   ├── index.html           # 登录/会话/审计/回放面板、终端容器
+│   ├── app.js               # 前端逻辑（登录、WS、xterm、字号/主题、会话恢复、审计列表/回放）
+│   ├── css/style.css        # 样式
+│   └── vendor/              # 自托管前端库
+│       ├── xterm.js / xterm.css
+│       ├── addon-fit.js
+│       ├── asciinema-player.js / .css   # 回放（3.17.0）
+│       └── VENDORS.md       # 第三方资源版本与 SHA-256 校验值
 ├── scripts/                 # 部署脚本（按发行版选择）
 │   ├── build_rootfs_ubuntu.sh   # 构建沙箱 rootfs（Ubuntu 22.04）
 │   └── build_rootfs_rhel.sh     # 构建沙箱 rootfs（RHEL 9.x）
@@ -172,6 +198,26 @@ sandbox:
   http_proxy: ""                     # http 代理地址（如 "http://proxy.example.com:8080"）；非空时注入沙箱环境变量 http_proxy/HTTP_PROXY
   https_proxy: ""                    # https 代理地址（如 "http://proxy.example.com:8080"）；非空时注入沙箱环境变量 https_proxy/HTTPS_PROXY
   no_proxy: ""                       # 不使用代理的主机列表（如 "localhost,127.0.0.1"）；非空时注入沙箱环境变量 no_proxy/NO_PROXY
+
+# 审计录制（DESIGN_AUDIT §10）
+audit:
+  enabled: true                       # 是否启用录制（false 时埋点为空操作）
+  dir: "/var/log/webshell/audit"      # 录制根目录（服务用户可写）
+  record_input: true                  # 是否录制输入事件（"i"，默认 true）
+  password_input: mask                # ECHO 关闭时：mask（默认，等长掩码）| omit | plaintext
+  password_mask_when: echo_verify     # 脱敏判据：echo_verify（默认，EVW）| echo_verify_tui | echo_off_canonical | echo_off
+  echo_verify_hang_ms: 2000           # EVW 观察窗口 hang 兜底时长（毫秒，默认 2000）
+  echo_verify_hang_policy: mask       # hang 兜底策略：mask（默认）| reached_plain
+  echo_verify_strict_batch: false     # echo=on 且整块含换行时一律掩码（默认 false）
+  # echo_verify_tui: false            # 是否启用 alt-screen TUI 门（echo_verify_tui 判据会隐式开启）
+  max_session_bytes: "100M"           # 单会话 cast 上限
+  max_total_bytes: "20G"              # 总量配额（最旧优先清理）
+  retention_days: 90                  # 保留期（按 ended_at；0=不自动清理）
+  cleanup_interval: "1h"              # 清扫间隔
+  fail_closed: false                  # recorder 打开失败时是否拒绝建会话（默认 false=fail-open）
+  trust_proxy: false                  # 是否信任 X-Forwarded-For
+  user_can_view_self: true            # 普通用户是否可看本人录屏
+  admins: ["alice", "auditor"]        # 审计员白名单
 ```
 
 > 配置同步仅在用户首次初始化（`~/.config/opencode/skills` 不存在）时执行；一旦 `skills` 目录已存在，则跳过全部同步（opencode.jsonc 与 skills 均不覆盖），保留用户已有配置。`overwrite` 仅在首次初始化时生效。
@@ -363,13 +409,13 @@ ease ALL=(root) NOPASSWD: /opt/webshell_sandbox1/sandbox-init
 4. 解析标识：账号名直接使用；邮箱经 AD 反查得到 `sAMAccountName`/DN/UAC；
 5. AD 认证：密码强认证（用户 DN + 密码 bind）或目录查询模式；
 6. 校验系统用户存在并取 HomeDir；
-7. 签发一次性 token。
+7. 签发 mgmt_token（可复用、绑定用户名、默认 8 小时）。
 
-`/ws` 升级前校验并消费 token（防重放），再以目标用户启动会话。
+`/ws` 升级前由 /api/session/ticket（Bearer mgmt_token）换取一次性 ticket，校验并一次性消费（60s、防重放，action=create|attach）后按 ticket 内意图启动会话。
 
 ## 会话模式与会话行为
 
-WebSocket 升级时通过 `?mode=` 查询参数决定会话类型（`handler/ws.go`）：
+WebSocket 升级时通过一次性 ticket 承载模式（/ws?ticket=<t>；ticket 内 action=create 时含 mode）：
 
 - `mode=opencode` 且 opencode 已启用 → 先同步配置，再以该用户启动 opencode TUI；
 - `mode=codex` 且 codex 已启用 → 先同步配置，再以该用户启动 codex TUI；
@@ -383,11 +429,11 @@ WebSocket 升级时通过 `?mode=` 查询参数决定会话类型（`handler/ws.
 - **opencode 模式**：退出 opencode TUI 即完全结束会话（不退回 bash），前端回到登录界面；
 - **codex 模式**：退出 codex TUI 即完全结束会话（不退回 bash），前端回到登录界面。
 
-**刷新保持会话**：页面刷新或短暂断线时，WebSocket 连接断开但 pty 会话会保留在服务端会话仓库（`handler/session_hub.go`）中一段时间（默认 5 分钟），前端把会话标识存入 `sessionStorage`，刷新后自动通过 `/api/resume` 探测并重连到同一终端——正在运行的进程（vim、命令等）不丢失。关闭标签页后 `sessionStorage` 清除，会话超时后被巡检自动回收。
+**刷新保持会话**：页面刷新或短暂断线时，WebSocket 连接断开但 pty 会话会保留在服务端会话仓库（`handler/index.go` 会话索引 + `handler/manager.go` 会话实体）中一段时间（默认 5 分钟），前端把会话标识存入 `sessionStorage`，刷新后自动通过 `/api/resume` 探测并重连到同一终端——正在运行的进程（vim、命令等）不丢失。关闭标签页后 `sessionStorage` 清除，会话超时后被巡检自动回收。
 
 ## WebSocket 协议
 
-`/ws?token=<token>&mode=<bash|opencode|codex>` 升级后，消息为 JSON 信封（`protocol/message.go`）：
+`/ws?ticket=<t>` 升级后（ticket 内含 mode，action=create|attach），消息为 JSON 信封（`protocol/message.go`）：
 
 | 类型     | 方向         | 说明                                             |
 | -------- | ------------ | ------------------------------------------------ |
@@ -400,7 +446,7 @@ WebSocket 升级时通过 `?mode=` 查询参数决定会话类型（`handler/ws.
 | `auth-response` | 客户端→服务端 | 回传单个 api_key：`{envVar, apiKey}`（逐项发送）   |
 | `auth-cancel`   | 客户端→服务端 | 用户取消补全流程                                  |
 
-恢复会话时前端改为连接 `/ws?session=<id>&username=<user>`（无需一次性 token），服务端据此重新附着到同一 pty 会话。
+恢复会话时前端先 GET /api/resume?session=<id>（Bearer mgmt_token）探测存活，再经 /api/session/ticket（attach 意图）换取一次性 ticket，连接 /ws?ticket=<t> 附着到同一 pty 会话。
 
 ## 测试
 
@@ -408,7 +454,7 @@ WebSocket 升级时通过 `?mode=` 查询参数决定会话类型（`handler/ws.
 go test ./...
 ```
 
-当前测试覆盖 `auth` 包（配置加载默认值、必填项校验、YAML 解析、codex env_key 提取）、`pty` 包（syncCodexCommand / syncConfigCommand 命令形态，含 AGENTS.md 与 agent/agents 目录每次启动补全片段断言）、`sandbox` 包（validate 对 codex 分支的校验）等。
+当前测试覆盖 `auth` 包（配置加载默认值、必填项校验、YAML 解析、codex env_key 提取）、`pty` 包（syncCodexCommand / syncConfigCommand 命令形态，含 AGENTS.md 与 agent/agents 目录每次启动补全片段断言）、`sandbox` 包（validate 对 codex 分支的校验）、audit 包（recorder/store/cast 单测，含 EVW 脱敏、切片、清扫）、handler 包（审计 API 权限与 active 409）。
 
 ## 安全说明
 
@@ -416,6 +462,8 @@ go test ./...
 - 日志不会记录密码原文；含 `@` 的邮箱登录名统一记为 `<email>` 占位；
 - 会话以目标用户运行（沙箱模式下为沙箱内真实用户身份，非沙箱模式为 `sudo -n -u <user> -i bash`），服务用户本身无该用户家目录访问权限时不受影响（工作目录设为 `/`，由 `sudo -i` / 沙箱切到用户家目录）；
 - 会话标识（sessionID）为 32 字节高熵随机值，作为恢复会话的 bearer 凭证并绑定用户名；断线保留设 5 分钟超时，超时由巡检自动回收，避免会话无限存活。
+- 审计数据只读：无任何人工删除入口，仅保留期/总量配额自动清理；active 会话不可回放/下载（409）。
+- 密码脱敏：密码输入按终端行为脱敏（EVW），不落明文（output 侧等同终端所见、不脱敏，已在录制提示中告知用户）。
 
 **沙箱安全**（启用沙箱时）：
 

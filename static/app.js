@@ -579,14 +579,15 @@
     fontSizeLabel.textContent = currentFontSize + "px";
     themeSelect.value = currentTheme;
 
-    // 选中后右键=复制：终端有选区时右键复制并阻止浏览器默认菜单；
-    // 无选区则保留默认菜单（浏览器自带复制/粘贴等）。
+    // 选中后右键=复制：终端有选区时右键复制并阻止浏览器默认菜单；复制后清除选区，
+    // 避免高亮滞留；无选区则保留默认菜单（浏览器自带复制/粘贴等）。
     if (!contextmenuCopyInstalled) {
       contextmenuCopyInstalled = true;
       terminalEl.addEventListener("contextmenu", function (ev) {
         if (term && term.hasSelection && term.getSelection()) {
           ev.preventDefault();
           copyToClipboardBestEffort(term.getSelection());
+          try { term.clearSelection(); } catch (e) {}
         }
       });
     }

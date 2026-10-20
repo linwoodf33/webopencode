@@ -308,7 +308,7 @@ type ClientInfo struct { IP, ForwardedFor, UserAgent string }
 - 归属判定：普通用户强制 `target==self`；审计员可显式指定 `username`（缺省全部）。
 - 越权一律 `404`（防枚举），与既有会话接口一致（`handler/session_api.go:175`）。
 - `/api/login` 响应新增 `is_auditor` 字段（`handler/login.go`），供前端决定是否展示审计入口；权限判定以服务端为准，前端仅作展示控制。
-- `/api/login` 响应**新增 `audit_enabled` 字段**（`handler/login.go`，审计是否启用）。前端以 `audit_enabled || is_auditor` 决定是否展示「审计」入口（`static/app.js` `syncAuditButton`），亦据 `audit_enabled` 决定是否弹出「录制明示」提示。
+- `/api/login` 响应**新增 `audit_enabled` 字段**（`handler/login.go`，审计是否启用）。前端以 `is_auditor || (audit_enabled && user_can_view_self)` 决定是否展示「审计」入口（`static/app.js` `syncAuditButton`）——`user_can_view_self: false` 时非审计员隐藏审计按钮；亦据 `audit_enabled` 决定是否弹出「录制明示」提示。登录响应同时新增 `user_can_view_self` 字段（来自 `cfg.AuditUserSelf`）。
 
 ### 7.3 用户本人可见性
 
@@ -473,7 +473,7 @@ AuditAdmins    map[string]bool
 | 前端：审计列表偏好持久化 | `localStorage` 键 `webshell.auditPrefs` 记住 pageSize/from/to；**页码不持久化** |
 | 前端：active 行按钮 | active（进行中）会话行**无回放/下载按钮** |
 | CSP 集成：player 加载 | `AsciinemaPlayer.create({data}, …)` 在 `script-src 'self' 'wasm-unsafe-eval'` 下加载成功，WASM 实例化无拦截（无 CompileError） |
-| 权限：登录字段与入口显隐 | `/api/login` 返回 `audit_enabled`/`is_auditor`；前端以 `audit_enabled \|\| is_auditor` 决定审计入口显隐 |
+| 权限：登录字段与入口显隐 | `/api/login` 返回 `audit_enabled`/`is_auditor`/`user_can_view_self`；前端以 `is_auditor \|\| (audit_enabled && user_can_view_self)` 决定审计入口显隐 |
 | 权限：`user_can_view_self=false` | 普通用户本人访问 self 端点亦 404（仅审计员可看） |
 | `rec.Open` 失败（fail-open/closed） | 默认会话照常建立并告警；`fail_closed=true` 时拒绝创建 |
 | api_key 补全流程 | cast 中**无** api_key 明文 |
@@ -547,4 +547,4 @@ AuditAdmins    map[string]bool
 9. **output 不脱敏**：录屏等同终端所见，output 侧不做脱敏，在用户提示中明示（§8.3、§11）。
 10. **审计数据只读**：**不提供任何人工删除能力**（移除 `POST /api/audit/delete` 端点、`Store.Delete`、前端「删除」按钮），清理仅由保留期/总量配额自动执行（§6.2）；**active（进行中）会话不可回放/下载**——`/api/audit/cast`、`/api/audit/download` 对 active 返回 `409 {"error":"active session"}`，前端亦不渲染「回放」「下载」按钮；`/api/audit/meta` 保持对 active 可读以展示状态（§7.2、§9）。
 11. **输入面板为最终形态**：asciinema-player 3.17.0 不渲染 `i`（input）事件，故「显示输入」由**前端自建输入面板**承担——解析 cast NDJSON 收集 `i` 事件、按时间轴对齐渲染、默认隐藏、仅审计员勾选「显示输入」查看（§8.2）。
-12. **登录字段与列表偏好**：`/api/login` 响应含 `is_auditor` 与 **`audit_enabled`**，前端以 `audit_enabled || is_auditor` 决定审计入口显隐（§7.2）；审计列表偏好持久化于 `localStorage` 键 `webshell.auditPrefs`（仅 `pageSize` 与 `from`/`to` 日期间隔，**页码不持久化**）。
+12. **登录字段与列表偏好**：`/api/login` 响应含 `is_auditor`、**`audit_enabled`** 与 **`user_can_view_self`**，前端以 `is_auditor || (audit_enabled && user_can_view_self)` 决定审计入口显隐（§7.2，`user_can_view_self: false` 时非审计员隐藏）；审计列表偏好持久化于 `localStorage` 键 `webshell.auditPrefs`（仅 `pageSize` 与 `from`/`to` 日期间隔，**页码不持久化**）。

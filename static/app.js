@@ -137,6 +137,7 @@
     maxTotalSessions: 10,
     auditEnabled: false,   // /api/login 的 audit_enabled：是否启用录制
     isAuditor: false,      // /api/login 的 is_auditor：是否审计员
+    userCanViewSelf: false,      // /api/login 的 user_can_view_self：普通用户可否查看本人录屏
   };
 
   // 录制明示「已读」标记（sessionStorage，本标签页内有效）。
@@ -175,6 +176,7 @@
           max_total_sessions: data.max_total_sessions,
           is_auditor: !!data.is_auditor,
           audit_enabled: !!data.audit_enabled,
+          user_can_view_self: !!data.user_can_view_self,   // 普通用户可查看本人录屏，刷新后恢复
         })
       );
     } catch (e) {}
@@ -211,6 +213,7 @@
     if (!isNaN(v) && v > 0) cfg.maxTotalSessions = v;
     if (typeof src.audit_enabled === "boolean") cfg.auditEnabled = src.audit_enabled;
     if (typeof src.is_auditor === "boolean") cfg.isAuditor = src.is_auditor;
+    if (typeof src.user_can_view_self === "boolean") cfg.userCanViewSelf = src.user_can_view_self;
   }
 
   // 会话持久化：把 sessionID/mode 存入 sessionStorage，页面刷新后据此恢复同一终端。
@@ -1197,10 +1200,10 @@
 
   // ===== 审计 / 回放 =====
 
-  // 按登录配置显隐审计入口（audit_enabled 或 is_auditor 任一为真即展示）。
+  // 按登录配置显隐审计入口：审计员，或（启用录制且允许普通用户查看本人录屏）时展示。
   function syncAuditButton() {
     if (!btnAudit) return;
-    var show = !!(cfg.auditEnabled || cfg.isAuditor);
+    var show = !!(cfg.isAuditor || (cfg.auditEnabled && cfg.userCanViewSelf));
     btnAudit.classList.toggle("hidden", !show);
   }
 

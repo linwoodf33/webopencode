@@ -36,6 +36,8 @@ type loginResponse struct {
 	IsAuditor bool `json:"is_auditor"`
 	// AuditEnabled 是否启用审计录制（供前端展示录制提示）。
 	AuditEnabled bool `json:"audit_enabled"`
+	// UserCanViewSelf 普通用户是否可回放本人录屏（user_can_view_self；供前端决定审计入口显隐）。
+	UserCanViewSelf bool `json:"user_can_view_self"`
 }
 
 // errorResponse 错误响应体。
@@ -129,6 +131,7 @@ func Login(a *auth.Authenticator, cfg *auth.Config) http.HandlerFunc {
 			MaxTotalSessions:   cfg.MaxTotalN,
 			IsAuditor:          cfg.IsAuditor(username),
 			AuditEnabled:       cfg.AuditEnabled,
+			UserCanViewSelf:    cfg.AuditUserSelf,
 		})
 	}
 }

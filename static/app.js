@@ -546,12 +546,14 @@
       cursorBlink: true, // 光标闪烁
       fontSize: currentFontSize,
       theme: THEMES[currentTheme],
+      allowProposedApi: true, // 启用 parser API 以便注册 OSC 52 剪贴板
     });
 
     fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     term.open(terminalEl);
     fitAddon.fit();
+    installOsc52Clipboard(term);
     fontSizeLabel.textContent = currentFontSize + "px";
     themeSelect.value = currentTheme;
 
@@ -576,6 +578,56 @@
         sendResize();
       });
     }
+  }
+
+  // OSC 52 剪贴板（opencode 等 TUI 复制到系统剪贴板）：ESC]52;Pc;Pd(BEL|ESC\)
+  // xterm 默认忽略该序列；这里注册处理器把 base64(Pd) 解码后写入浏览器剪贴板。
+  // 站点为 http（非安全上下文）时 navigator.clipboard 不可用，回退隐藏 textarea + execCommand。
+  function installOsc52Clipboard(t) {
+    if (!t || !t.parser || !t.parser.registerOscHandler) return;
+    t.parser.registerOscHandler(52, function (data) {
+      // data 是字符串 payload，形如 "c;SGVsbG8=" 或 ";;aGk="（Pc 可省略，省略默认剪贴板）。
+      var idx = data.indexOf(";");
+      var pc = idx === -1 ? data : data.slice(0, idx);
+      var pd = idx === -1 ? "" : data.slice(idx + 1);
+      if (pd === "" || pd === "?") return true;   // 读取/查询：忽略，直接消费
+      if (pc !== "" && pc.indexOf("c") === -1 && pc.indexOf("p") === -1) return true; // 非剪贴板目标：忽略；空 Pc 视为默认剪贴板
+      try {
+        var b64 = pd.replace(/\s+/g, "");
+        var bin = atob(b64);
+        var u8 = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i) & 0xff;
+        var text = new TextDecoder("utf-8").decode(u8);
+        copyToClipboardBestEffort(text);
+      } catch (e) {}
+      return true;
+    });
+  }
+
+  // 尽力复制：安全上下文用异步剪贴板 API，否则隐藏 textarea + execCommand 回退。
+  function copyToClipboardBestEffort(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text)["catch"](function () { fallbackCopy(text); });
+    } else {
+      fallbackCopy(text);
+    }
+  }
+
+  function fallbackCopy(text) {
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      ta.style.top = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    } catch (e) {}
   }
 
   // 设置终端字号并持久化；调整后重新 fit 并同步终端尺寸。

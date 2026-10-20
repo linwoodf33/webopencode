@@ -17,3 +17,6 @@
 # 本地调试产物（playwright 快照/截图）
 /.playwright-cli/
 /*.png
+
+# 演示/交付文档（PPT 等二进制演示件不入源码仓库）
+/*.pptx

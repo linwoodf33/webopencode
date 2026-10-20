@@ -13,6 +13,7 @@
 
 - **AD 登录认证**：通过 LDAPS 连接域控，支持账号名或邮箱登录；可开启密码强认证（用户 DN + 密码 bind）。
 - **会话凭证（P1）**：登录签发可复用的 mgmt_token（默认 8 小时，绑定用户名，用于会话/审计等所有 HTTP 操作）；建立 WebSocket 前经 /api/session/ticket 换取 60 秒一次性 ticket（防重放、一次性消费，action=create|attach）。
+- **登录白名单（配置热更新）**：登录闸门由独立的 `web_users_file` 名单文件控制（一行一用户名、大小写不敏感、精确匹配），与操作系统（`/etc/group`）解耦；编辑名单后下一次登录即时生效、无需重启服务；默认 fail-closed（未配置/文件缺失/为空/全注释 → 全拒），`web_users_fail_open: true` 为逃生阀（详见「登录白名单」配置段）。
 - **会话模式选择**：登录成功后，若启用了 opencode 或 codex，前端展示「打开 Bash / 打开 OpenCode / 打开 Codex」选择面板；用户选择后才建立终端连接。
 - **opencode 集成**：选择 opencode 后，以登录用户身份在其家目录启动 opencode TUI；退出 opencode 即完全结束会话（不退回 bash）。
 - **codex 集成**：选择 codex 后，以登录用户身份在其家目录启动 codex TUI（经 `sudo -n -E -u <user> -i bash -c 'cd <home> && <codexPath>'`）；退出 codex 即完全结束会话（不退回 bash）。
@@ -143,6 +144,10 @@ max_long_sessions: 3               # 每用户长期会话数量上限，默认 
 max_total_sessions: 10             # 每用户会话总数上限（长+短），默认 10
 mgmt_ttl_hours: 8                  # 管理 token（mgmt_token）有效期（小时），默认 8
 
+# 登录白名单（独立配置文件；改文件后下一次登录即时生效）
+web_users_file: "/etc/webshell/web_users"  # 白名单文件绝对路径；空=未配置（fail-closed 全拒）
+web_users_fail_open: false         # 逃生阀：true 无条件全放行；缺省 false
+
 # opencode 模式：登录后由用户选择进入 opencode TUI 或 bash
 opencode:
   enabled: true                    # true=展示「打开 Bash / 打开 OpenCode」选择面板
@@ -249,6 +254,29 @@ audit:
 - `userns_init_path`：userns-init 可执行文件绝对路径。**留空（缺省）时自动推导为 sandbox-init 同目录下的 `userns-init`**，无需额外配置；仅在需要将 userns-init 放到其他位置时显式指定。
 - `http_proxy` / `https_proxy`：http/https 代理地址（如 `"http://proxy.example.com:8080"`），非空时注入沙箱进程环境变量（同时设置小写与大写两种形式，如 `http_proxy` / `HTTP_PROXY`）。仅 `network: full` 时沙箱有外部网络，代理才能生效。
 - `no_proxy`：不使用代理的主机/域名列表（逗号分隔，如 `"localhost,127.0.0.1"`），非空时注入沙箱进程环境变量（同时设置 `no_proxy` / `NO_PROXY`）。
+
+### 登录白名单
+
+登录闸门由**独立的白名单文件**控制（取代旧的 `/etc/group` 组员方案）：AD 认证通过、且系统存在该用户后，还须命中白名单才签发 `mgmt_token`。
+
+- **配置**：
+  - `web_users_file`：白名单文件绝对路径；**空（缺省）= 未配置**，此时按 fail-closed **全拒**。
+  - `web_users_fail_open`：逃生阀，`true` 时**无条件全放行**（慎用）；缺省 `false`。
+- **文件格式**：
+  - 一行一个用户名；整行以 `#` 开头为注释；空行忽略；**不支持行尾 `#` 注释**。
+  - 用户名须匹配 `^[a-z_][a-z0-9_-]{0,31}$`，非法行跳过并打一次告警；匹配**大小写不敏感**（统一按小写比对，精确匹配、杜绝子串误判）。
+  - 示例：
+    ```text
+    # /etc/webshell/web_users
+    alice
+    bob
+    # carol  # 整行注释
+    ```
+- **三态语义**：
+  1. `web_users_fail_open: true` → 恒放行；
+  2. 未配置（`web_users_file` 为空）且非 fail-open → 恒拒绝；
+  3. 已配置但文件缺失 / 为空 / 全注释 → 全拒（fail-closed）。
+- **热更新**：判定时惰性比对文件 `mtime` + 大小，文件变化才重读重建快照——**编辑文件后下一次登录即生效，无需重启服务**。读取失败时保留上次成功快照继续裁决（fail-stale，不降级为 fail-open 也不全拒）；首次加载失败则 fail-closed。无后台 goroutine。
 
 ### 配置加载优先级
 

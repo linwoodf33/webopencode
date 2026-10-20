@@ -35,6 +35,12 @@ func main() {
 
 	authr := auth.NewAuthenticator(cfg)
 
+	// 登录白名单预热（不 fail-fast）：加载失败仅告警，运行期按 fail-closed 全拒
+	//（或 fail-stale 保留上次成功快照）；文件热更新由 Allowed 惰性检测负责。
+	if err := authr.Whitelist().LoadOnce(); err != nil {
+		log.Printf("warn: web users whitelist warm-up: %v (deny-all fallback active)", err)
+	}
+
 	// 静态资源托管：/static/* -> 内嵌 FS 的 static 子目录（不依赖磁盘路径/cwd）。
 	sub, err := staticSub()
 	if err != nil {

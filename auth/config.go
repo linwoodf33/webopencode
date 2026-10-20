@@ -373,6 +373,16 @@ type Config struct {
 	// true：manager 搜索取 DN 后用「用户 DN+密码」bind 校验；
 	// false：退回目录查询模式（只查目录存在，不校验用户密码）。
 	RequirePassword bool `yaml:"require_password"`
+	// WebUsersFile 登录白名单文件绝对路径（独立的文本文件，一行一用户名）。
+	// 空 = 未配置：默认 fail-closed（全拒）。文件热更新：改文件后下一次登录即生效。
+	// 三态语义见 WebUsersFailOpen 注释。
+	WebUsersFile string `yaml:"web_users_file"`
+	// WebUsersFailOpen 白名单逃生阀。true 时无条件全放行（慎用）；缺省 false。
+	// 三态语义：
+	//   fail_open=true                 → 恒放行；
+	//   未配置(path=="") && !fail_open → 恒拒绝（fail-closed）；
+	//   已配置但文件缺失/为空/全注释   → 全拒（fail-closed）。
+	WebUsersFailOpen bool `yaml:"web_users_fail_open"`
 	// Listen 服务监听地址与端口，格式 host:port（如 "0.0.0.0:8080" 或 ":8080"）。
 	// 为空时走默认 ":8080"。
 	Listen string `yaml:"listen"`
@@ -509,6 +519,16 @@ max_session_ttl_hours: 168
 max_long_sessions: 3
 max_total_sessions: 10
 mgmt_ttl_hours: 8
+
+# 登录白名单（独立配置文件；编辑文件后下一次登录即时生效，无需重启）
+# web_users_file: 白名单文件绝对路径；空（缺省）= 未配置，按 fail-closed 全拒
+#   文件格式：一行一个用户名；整行以 # 开头为注释；空行忽略；不支持行尾 # 注释
+#   用户名校验：^[a-z_][a-z0-9_-]{0,31}$（大小写不敏感，匹配时统一小写）
+# web_users_fail_open: 逃生阀；true 时无条件全放行（慎用）；缺省 false
+#   三态语义：fail_open=true → 恒放行；未配置 + fail_open=false → 恒拒绝；
+#             已配置但文件缺失/为空/全注释 → 全拒（fail-closed）
+web_users_file: "/etc/webshell/web_users"
+web_users_fail_open: false
 
 # opencode 模式：登录后是否直接进入 opencode TUI（而非 bash）
 # enabled: true 进入 opencode；false（缺省）退回 bash
@@ -752,6 +772,9 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, errors.New("missing required config sandbox.rootfs_path")
 		}
 	}
+
+	// 登录白名单：web_users_file / web_users_fail_open 无默认值（三态语义由
+	// UserWhitelist 运行时解释：未配置=fail-closed，不在此派生）。
 
 	// audit 配置派生与默认（DESIGN_AUDIT §10）。
 	cfg.AuditEnabled = cfg.Audit.EnabledValue()

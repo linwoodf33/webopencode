@@ -37,6 +37,16 @@ max_long_sessions: 3
 max_total_sessions: 10
 mgmt_ttl_hours: 8
 
+# 登录白名单（独立配置文件；编辑文件后下一次登录即时生效，无需重启）
+# web_users_file: 白名单文件绝对路径；空（缺省）= 未配置，按 fail-closed 全拒
+#   文件格式：一行一个用户名；整行以 # 开头为注释；空行忽略；不支持行尾 # 注释
+#   用户名校验：^[a-z_][a-z0-9_-]{0,31}$（大小写不敏感，匹配时统一小写）
+# web_users_fail_open: 逃生阀；true 时无条件全放行（慎用）；缺省 false
+#   三态语义：fail_open=true → 恒放行；未配置 + fail_open=false → 恒拒绝；
+#             已配置但文件缺失/为空/全注释 → 全拒（fail-closed）
+web_users_file: "/etc/webshell/web_users"
+web_users_fail_open: false
+
 # opencode 模式：登录后是否直接进入 opencode TUI（而非 bash）
 # enabled: true 进入 opencode；false（缺省）退回 bash
 # path: opencode 可执行文件绝对路径（缺省给默认值）

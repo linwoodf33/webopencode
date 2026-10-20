@@ -180,3 +180,36 @@ func TestAuthenticatorMgmtWrappers(t *testing.T) {
 		t.Error("ValidateMgmt after revoke should fail")
 	}
 }
+
+// TestNewAuthenticatorWhitelistWiring 验证认证器正确接线白名单。
+func TestNewAuthenticatorWhitelistWiring(t *testing.T) {
+	a := newTestAuth(t)
+	if a.Whitelist() == nil {
+		t.Fatal("Whitelist() should not be nil")
+	}
+	// 未配置白名单（path==""）且非 fail-open → fail-closed（全拒）。
+	if a.Whitelist().Allowed("alice") {
+		t.Error("unconfigured whitelist should deny (fail-closed)")
+	}
+}
+
+// TestNewAuthenticatorWhitelistFailOpen 验证逃生阀 fail-open 生效。
+func TestNewAuthenticatorWhitelistFailOpen(t *testing.T) {
+	cfg := &Config{
+		AD: ADConfig{
+			Server:          "127.0.0.1:1",
+			ManagerDN:       "test",
+			ManagerPassword: "test",
+			SearchDN:        "test",
+			TLSInsecure:     true,
+		},
+		ADTimeout:        time.Second,
+		MgmtTTLd:         8 * time.Hour,
+		WebUsersFailOpen: true,
+	}
+	a := NewAuthenticator(cfg)
+	if !a.Whitelist().Allowed("anyone") {
+		t.Error("fail-open whitelist should allow anyone")
+	}
+}
+

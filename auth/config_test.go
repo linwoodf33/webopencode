@@ -946,4 +946,76 @@ func TestExampleConfigParse(t *testing.T) {
 	if !cfg.IsAuditor("alice") || !cfg.IsAuditor("auditor") {
 		t.Errorf("ExampleConfig admins not parsed: %v", cfg.AuditAdmins)
 	}
+	// 登录白名单字段（防示例漂移）。
+	if cfg.WebUsersFile != "/etc/webshell/web_users" {
+		t.Errorf("ExampleConfig WebUsersFile = %q, want /etc/webshell/web_users", cfg.WebUsersFile)
+	}
+	if cfg.WebUsersFailOpen {
+		t.Error("ExampleConfig web_users_fail_open should default to false")
+	}
+}
+
+func TestLoadConfigWebUsersDefaults(t *testing.T) {
+	// 未显式设置：web_users_file 为空（未配置），web_users_fail_open 缺省 false。
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.WebUsersFile != "" {
+		t.Errorf("WebUsersFile = %q, want empty (unconfigured)", cfg.WebUsersFile)
+	}
+	if cfg.WebUsersFailOpen {
+		t.Error("WebUsersFailOpen should default to false")
+	}
+}
+
+func TestLoadConfigWebUsersExplicit(t *testing.T) {
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+web_users_file: "/etc/webshell/web_users"
+web_users_fail_open: true
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.WebUsersFile != "/etc/webshell/web_users" {
+		t.Errorf("WebUsersFile = %q, want /etc/webshell/web_users", cfg.WebUsersFile)
+	}
+	if !cfg.WebUsersFailOpen {
+		t.Error("WebUsersFailOpen should be true")
+	}
+}
+
+func TestLoadConfigUsersGroupKeyIgnored(t *testing.T) {
+	// 旧键 users_group 已移除：文件即使含该键也被忽略，不生效、不报错。
+	path := writeTempConfig(t, `
+ad:
+  server: "ldaps.example.com:636"
+  manager_dn: "dn"
+  manager_password: "pw"
+  search_dn: "dc=base"
+users_group: "webusers"
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig with legacy users_group: %v", err)
+	}
+	if cfg.WebUsersFile != "" {
+		t.Errorf("legacy users_group must not affect WebUsersFile; got %q", cfg.WebUsersFile)
+	}
+	if cfg.WebUsersFailOpen {
+		t.Error("legacy users_group must not affect WebUsersFailOpen")
+	}
 }

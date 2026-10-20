@@ -197,6 +197,13 @@ require_password: true
 # config.example.yaml 的 mgmt_ttl_hours 等，本行为旧版残留标注）
 listen: "0.0.0.0:8090"              # 端口可改
 
+# 登录白名单（独立配置文件；改文件后下一次登录即时生效，无需重启）
+# 一行一个用户名；整行 # 开头为注释；空行忽略；不支持行尾 # 注释
+# 用户名校验 ^[a-z_][a-z0-9_-]{0,31}$，大小写不敏感
+# 三态：fail_open=true 恒放行；未配置且非 fail-open 恒拒绝；文件缺失/空/全注释 全拒
+web_users_file: "/etc/webshell/web_users"
+web_users_fail_open: false
+
 opencode:
   enabled: true
   path: "/share/apps/.opencode/bin/opencode"
@@ -276,6 +283,15 @@ chmod 600 /opt/webshell_sandbox1/config.yaml
 - `sandbox.enabled=false`：退回传统 sudo 直连（不叠加沙箱隔离）
 - **`/etc/ssl/certs`**：把宿主 CA 证书目录 bind 进沙箱，解决沙箱内 HTTPS 失败（curl 报 `(77) error setting certificate file`、codex 报 "waiting for network"）。**沙箱内 opencode/codex 联网必需**；未 bind 时沙箱 rootfs 缺少 CA 证书，所有 HTTPS 请求都会失败。
 - **`/share/apps/.opencode` 与 `/share/apps/.codex-standalone`**：把宿主 opencode/codex 目录 bind 进沙箱（方案 B），沙箱直接读取宿主版本；更新版本只需替换宿主文件，无需拷贝 rootfs（详见「更新 opencode / codex 版本」）。注意 bind 后沙箱内（登录用户身份）对这些目录**可写**（未做只读 remount），实际以只读方式执行，风险低。
+- **登录白名单（`web_users_file` / `web_users_fail_open`）**：登录闸门由独立文本文件控制，取代旧的 `/etc/group` 组员方案。`web_users_file` 指向白名单文件（一行一个用户名，整行 `#` 为注释，大小写不敏感，非法行跳过）；**改文件后下一次登录即生效，无需重启**。默认 fail-closed：未配置 / 文件缺失 / 为空 / 全注释 → 全拒。`web_users_fail_open: true` 为逃生阀（无条件全放行，仅过渡/排障期临时使用）。
+  - 文件须对服务运行用户可读（如 `chown ease:ease /etc/webshell/web_users && chmod 644`）。
+  - **升级迁移（从旧 `users_group`）**：旧版按 `/etc/group` 中某组的组员名单放行。升级时把该组组员导出到白名单文件即可：
+    ```bash
+    # 假设旧配置 users_group: webusers
+    getent group webusers | cut -d: -f4 | tr ',' '\n' | sed '/^$/d' > /etc/webshell/web_users
+    chown ease:ease /etc/webshell/web_users && chmod 644 /etc/webshell/web_users
+    ```
+    随后在新 `config.yaml` 设置 `web_users_file: "/etc/webshell/web_users"` 并**删除旧键 `users_group`**（该键已失效，出现会被忽略）。过渡期若担心名单遗漏导致全拒，可临时 `web_users_fail_open: true`，确认白名单无误后再改回 `false`。
 
 ### 3. 审计（audit）配置与数据目录
 

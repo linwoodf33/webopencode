@@ -16,6 +16,8 @@ var (
 	ErrRootNotAllowed = errors.New("root is not allowed")
 	// ErrNotProvisioned 系统不存在该用户。对应 403。
 	ErrNotProvisioned = errors.New("user not provisioned on this host")
+	// ErrNotEnabled 账号存在但未被管理员开通 web 使用权限。对应 403。
+	ErrNotEnabled = errors.New("account not enabled on this platform, contact admin")
 )
 
 // usernameRegexp 校验用户名格式：小写字母/下划线开头，后续可含数字、下划线、连字符，最长 32。
@@ -32,11 +34,12 @@ type resolvedUser struct {
 	userAccountControl int
 }
 
-// Authenticator 封装「AD 认证 + 正则 + 非root + 系统存在」的完整校验流程。
+// Authenticator 封装「AD 认证 + 正则 + 非root + 系统存在 + 登录白名单」的完整校验流程。
 type Authenticator struct {
 	ad              *ADClient
 	mgmt            *MgmtTokenStore
 	requirePassword bool
+	whitelist       *UserWhitelist
 }
 
 // NewAuthenticator 基于配置创建一个认证器。
@@ -45,8 +48,12 @@ func NewAuthenticator(cfg *Config) *Authenticator {
 		ad:              NewADClient(cfg),
 		mgmt:            NewMgmtTokenStore(cfg.MgmtTTLd),
 		requirePassword: cfg.RequirePassword,
+		whitelist:       newUserWhitelist(cfg.WebUsersFile, cfg.WebUsersFailOpen),
 	}
 }
+
+// Whitelist 暴露登录白名单（供 main 预热/诊断）。
+func (a *Authenticator) Whitelist() *UserWhitelist { return a.whitelist }
 
 // ADClient 暴露 AD 客户端（供诊断使用）。
 func (a *Authenticator) ADClient() *ADClient { return a.ad }
@@ -184,6 +191,12 @@ func (a *Authenticator) Login(rawUsername, rawPassword string) (token, username,
 	u, uerr := user.Lookup(username)
 	if uerr != nil {
 		return "", "", "", ErrNotProvisioned
+	}
+
+	// 7.5 登录白名单校验：账号须在 web_users_file 白名单内（独立配置文件，热更新）。
+	// 管理员增删名单即时生效，无需重启服务；默认 fail-closed（未配置/文件缺失即全拒）。
+	if !a.whitelist.Allowed(username) {
+		return "", "", "", ErrNotEnabled
 	}
 
 	// 8. 签发 mgmt_token。

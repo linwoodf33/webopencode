@@ -64,6 +64,8 @@ func loginStatus(err error) (int, string) {
 		return http.StatusForbidden, "root is not allowed"
 	case errors.Is(err, auth.ErrNotProvisioned):
 		return http.StatusForbidden, "user not provisioned on this host"
+	case errors.Is(err, auth.ErrNotEnabled):
+		return http.StatusForbidden, "账号未开通,请联系管理员开通后使用"
 	case errors.Is(err, auth.ErrServiceUnavailable):
 		// 服务端故障（AD 不可达/绑定失败）。502/503 均可，用 503 表示服务暂不可用。
 		return http.StatusServiceUnavailable, "authentication service unavailable"

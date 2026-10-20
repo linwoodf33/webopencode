@@ -562,22 +562,17 @@
     // 会话打开即聚焦终端隐藏输入框，确保 Ctrl+V 等浏览器 paste 事件能送达 xterm。
     try { if (term && term.focus) term.focus(); } catch (e) {}
     installOsc52Clipboard(term);
-    // Ctrl+V 粘贴：安全上下文用 navigator.clipboard.readText 程序化粘贴；
-    // http 内网（非安全上下文）无法读剪贴板，聚焦后放行，走浏览器原生 paste 事件接力。
+    // Ctrl+V 粘贴：返回 false 跳过 xterm 内部 keydown 处理——xterm 对 Ctrl+V 会
+    // preventDefault，从而掐断浏览器原生 paste 事件（表现为只发出 ^V 控制字符）。
+    // 放行后浏览器原生粘贴事件送达 xterm（其从 clipboardData 读取文本并转发 pty），
+    // http/https 均可用，不依赖受限的 navigator.clipboard。
     // Ctrl+C 不拦截，保持终端 SIGINT 语义。
     term.attachCustomKeyEventHandler(function (ev) {
       if (!ev || ev.type !== "keydown") return true;
       var ctrl = ev.ctrlKey && !ev.altKey && !ev.metaKey;
       if (ctrl && (ev.key === "v" || ev.key === "V")) {
-        if (window.isSecureContext && navigator.clipboard && navigator.clipboard.readText) {
-          ev.preventDefault();
-          navigator.clipboard.readText().then(function (text) {
-            if (text) { try { term.paste(text); } catch (e) {} }
-          })["catch"](function () {});
-          return false;
-        }
         try { if (term && term.focus) term.focus(); } catch (e) {}
-        return true; // http：放行原生 paste
+        return false; // 不 preventDefault，交浏览器原生粘贴
       }
       return true;
     });

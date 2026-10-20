@@ -114,6 +114,9 @@
   // window.resize 监听只注册一次（模块级 flag），避免多次进出终端时重复累积。
   var resizeListenerAdded = false;
 
+  // 右键复制监听已安装标志（terminalEl 为常驻元素，仅需一次）。
+  var contextmenuCopyInstalled = false;
+
   // 当前会话标识（用于页面刷新后恢复同一终端），以及管理凭证/用户名。
   var currentSessionID = null;
   var mgmtToken = null;
@@ -556,6 +559,18 @@
     installOsc52Clipboard(term);
     fontSizeLabel.textContent = currentFontSize + "px";
     themeSelect.value = currentTheme;
+
+    // 选中后右键=复制：终端有选区时右键复制并阻止浏览器默认菜单；
+    // 无选区则保留默认菜单（浏览器自带复制/粘贴等）。
+    if (!contextmenuCopyInstalled) {
+      contextmenuCopyInstalled = true;
+      terminalEl.addEventListener("contextmenu", function (ev) {
+        if (term && term.hasSelection && term.getSelection()) {
+          ev.preventDefault();
+          copyToClipboardBestEffort(term.getSelection());
+        }
+      });
+    }
 
     // 用户输入 -> 发送 input 消息。
     term.onData(function (data) {

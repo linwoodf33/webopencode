@@ -61,7 +61,16 @@ body {
   color: #dcdcdc;
 }
 .player {
-  margin: 16px;
+  width: 100%;
+  min-height: 240px;
+  max-width: 1000px;
+  margin: 16px auto;
+  box-sizing: border-box;
+  background: #000;
+  border: 1px solid #2b2d2e;
+  border-radius: 6px;
+  overflow: auto;
+  padding: 8px;
 }
 #err {
   display: none;

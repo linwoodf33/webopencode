@@ -32,7 +32,7 @@
 - **会话审计录制**：长期会话的 pty 输入/输出录制为 asciicast v2（NDJSON），落盘 `<audit_dir>/<username>/<sessionID>/{meta.json, cast.log}`（目录 0700 / 文件 0600）；detach 期后台输出同样录制；写盘失败降级丢弃不阻塞终端。
 - **密码输入脱敏（EVW）**：`record_input` 与 `password_input: mask|omit|plaintext`；判据 `password_mask_when` 默认 `echo_verify`（回显验证窗口：raw 输入先待定，窗内观察到回显记明文、否则掩码，`echo_verify_hang_ms`/`echo_verify_hang_policy` 兜底，`echo_verify_strict_batch`/`echo_verify_tui` 门）。逐键 `read -s` 密码块掩码、普通可见输入明文、整块粘贴盲区按策略处理。
 - **审计员与权限**：审计员白名单 `audit.admins`（大小写不敏感）；登录响应含 `is_auditor`/`audit_enabled`；普通用户可看本人录屏（`user_can_view_self`）；审计数据只读。
-- **审计 API（只读）**：`GET /api/audit/sessions|meta|cast|download`（均 `Bearer mgmt_token`；download 仅审计员；active 会话 cast/download 返回 409，meta 可读）。
+- **审计 API（只读）**：`GET /api/audit/sessions|meta|cast|download`（均 `Bearer mgmt_token`；download 仅审计员；active 会话 cast/download 返回 409，meta 可读）。download 打包为 zip，含 `meta.json` + `<sid>.cast` + `offline-player.html`（自包含离线回放页，双击即可离线回放；玩家资源缺失或 cast 超 64MB 时静默降级为双文件 zip）。
 - **回放与输入面板**：自托管 asciinema-player 3.17.0（`static/vendor/`，SHA-256 见 VENDORS.md）；player 不渲染输入事件，故自建「显示输入」面板（默认隐藏、仅审计员）；CSP 需 `script-src 'self' 'wasm-unsafe-eval'`（player 内嵌 WASM）。
 - **审计列表 UI**：日期间隔筛选 + offset/limit 分页（页码「第 X / Y 页 · 共 N 条」、行数 10/20/30/50，localStorage `webshell.auditPrefs` 记住 pageSize/from/to）；active 行显示「进行中」且无回放/下载按钮。
 - **录制明示与运维**：首次进入终端/审计页展示「本会话输入输出将被记录用于审计」横条；优雅停机（先逐会话 Close 再 srv.Shutdown）、保留期/配额自动清理、启动巡检 ScanAndFinalize。
@@ -66,7 +66,8 @@
 ├── audit/                   # 会话审计录制（asciicast v2）
 │   ├── recorder.go          # 录制写入/EVW 脱敏/异步落盘
 │   ├── store.go             # 列表/读取/切片/清扫/启动巡检
-│   └── cast.go              # NDJSON 编解码/按时间切片
+│   ├── cast.go              # NDJSON 编解码/按时间切片
+│   └── offline.go           # 离线回放页组装（内联 player css/js + cast + 元信息）
 ├── pty/
 │   ├── session.go           # pty 会话管理、sudo/沙箱启动、opencode/codex 配置同步
 │   ├── echo_linux.go        # Linux termios ECHO/ICANON 查询（供脱敏）

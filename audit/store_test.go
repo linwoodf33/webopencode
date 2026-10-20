@@ -343,7 +343,7 @@ func TestStoreDownload(t *testing.T) {
 	})
 
 	var buf bytes.Buffer
-	if err := s.Download("alice", "dl1", &buf); err != nil {
+	if err := s.Download("alice", "dl1", &buf, nil); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	zr, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
@@ -364,5 +364,47 @@ func TestStoreDownload(t *testing.T) {
 	}
 	if !names["meta.json"] || !names["dl1.cast"] {
 		t.Fatalf("zip contents wrong: %v", names)
+	}
+}
+
+// TestStoreDownloadOfflineHTML 验证 offlineHTML 非空时追加 offline-player.html 条目，
+// 且内容逐字节等于传入值（三个条目）。
+func TestStoreDownloadOfflineHTML(t *testing.T) {
+	s := newTestStore(t, Options{RecordInput: true, FlushInterval: 5 * time.Millisecond, FlushThreshold: 1})
+	writeSession(t, s, SessionMeta{SessionID: "dl2", Username: "alice", Mode: "bash", CreatedAt: time.Unix(1700000000, 0), StartedAt: time.Unix(1700000000, 0)}, func(r *Recorder) {
+		r.WriteOutput([]byte("out"))
+	})
+
+	html := []byte("<!DOCTYPE html><html><body>offline-marker</body></html>")
+	var buf bytes.Buffer
+	if err := s.Download("alice", "dl2", &buf, html); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatalf("zip open: %v", err)
+	}
+	names := map[string]bool{}
+	var offline []byte
+	for _, f := range zr.File {
+		names[f.Name] = true
+		rc, err := f.Open()
+		if err != nil {
+			t.Fatalf("zip entry open: %v", err)
+		}
+		b, err := io.ReadAll(rc)
+		if err != nil {
+			t.Fatalf("zip entry read: %v", err)
+		}
+		_ = rc.Close()
+		if f.Name == "offline-player.html" {
+			offline = b
+		}
+	}
+	if len(names) != 3 || !names["meta.json"] || !names["dl2.cast"] || !names["offline-player.html"] {
+		t.Fatalf("zip contents wrong: %v", names)
+	}
+	if !bytes.Equal(offline, html) {
+		t.Fatalf("offline html mismatch: got %q want %q", offline, html)
 	}
 }

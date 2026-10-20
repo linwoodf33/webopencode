@@ -86,7 +86,7 @@ func TestAuditDownloadActiveConflict(t *testing.T) {
 	api, root := newAuditAPIWithRoot(t, map[string]bool{"s1": true})
 	writeAuditSession(t, root, "alice", "s1", auditCastBody, false)
 
-	h := NewAuditDownloadHandler(api)
+	h := NewAuditDownloadHandler(api, nil)
 	w := httptest.NewRecorder()
 	h(w, requestAs(http.MethodGet, "/api/audit/download?session=s1", "auditor"))
 	if w.Code != http.StatusConflict {
@@ -115,7 +115,7 @@ func TestAuditDownloadInactiveOK(t *testing.T) {
 	api, root := newAuditAPIWithRoot(t, nil)
 	writeAuditSession(t, root, "alice", "s1", auditCastBody, true)
 
-	h := NewAuditDownloadHandler(api)
+	h := NewAuditDownloadHandler(api, nil)
 	w := httptest.NewRecorder()
 	h(w, requestAs(http.MethodGet, "/api/audit/download?session=s1", "auditor"))
 	if w.Code != http.StatusOK {
@@ -165,5 +165,49 @@ func TestAuditCastForeignNotFound(t *testing.T) {
 	h(w, requestAs(http.MethodGet, "/api/audit/cast?session=s2", "alice"))
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("foreign cast = %d, want 404", w.Code)
+	}
+}
+
+// inactive 会话 download（带离线模板）→ 200，zip 三条目，offline-player.html 内联
+// js/css 特征与元信息。
+func TestAuditDownloadInactiveWithTemplate(t *testing.T) {
+	api, root := newAuditAPIWithRoot(t, nil)
+	writeAuditSession(t, root, "alice", "s1", auditCastBody, true)
+
+	tmpl := audit.OfflinePlayerTemplate([]byte("js-marker"), []byte("css-marker"))
+	h := NewAuditDownloadHandler(api, tmpl)
+	w := httptest.NewRecorder()
+	h(w, requestAs(http.MethodGet, "/api/audit/download?session=s1", "auditor"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("inactive download = %d, want 200", w.Code)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(w.Body.Bytes()), int64(w.Body.Len()))
+	if err != nil {
+		t.Fatalf("zip open: %v", err)
+	}
+	names := map[string]bool{}
+	var offline []byte
+	for _, f := range zr.File {
+		names[f.Name] = true
+		rc, err := f.Open()
+		if err != nil {
+			t.Fatalf("zip entry open: %v", err)
+		}
+		b, err := io.ReadAll(rc)
+		if err != nil {
+			t.Fatalf("zip entry read: %v", err)
+		}
+		_ = rc.Close()
+		if f.Name == "offline-player.html" {
+			offline = b
+		}
+	}
+	if len(names) != 3 || !names["meta.json"] || !names["s1.cast"] || !names["offline-player.html"] {
+		t.Fatalf("zip contents wrong: %v", names)
+	}
+	for _, marker := range []string{"js-marker", "css-marker", `id="player"`, "f-username"} {
+		if !bytes.Contains(offline, []byte(marker)) {
+			t.Fatalf("offline html missing marker %q", marker)
+		}
 	}
 }

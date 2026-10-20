@@ -304,6 +304,7 @@ type ClientInfo struct { IP, ForwardedFor, UserAgent string }
 | 删除录屏 | ❌ | ❌ |
 
 - **审计数据只读**：不提供任何人工删除入口（无 delete 端点、无前端删除按钮）；数据仅由保留期/总量配额自动清理（§6.2）。`active`（进行中）会话不可回放/下载（cast/download 返回 `409`），但 `meta` 仍可读以展示状态。
+- **下载取证包（离线页）权限面**：download 仅审计员可用（`RequireAuditor`）。zip 内 `offline-player.html` 属离线自包含页面，脱离主站 CSP 运行，故其 XSS 防线内置在生成侧：title `html.EscapeString`、meta/cast 走 `json.Marshal` 的 HTML 转义 JS 字面量、元信息用 `textContent` 渲染（详见 §9）。
 - 所有审计 API 仍走既有 `RequireMgmt`（Bearer mgmt_token，`handler/session_api.go:73`）；在其上叠加 `RequireAuditor`（校验 username ∈ admins）用于越权端点。
 - 归属判定：普通用户强制 `target==self`；审计员可显式指定 `username`（缺省全部）。
 - 越权一律 `404`（防枚举），与既有会话接口一致（`handler/session_api.go:175`）。
@@ -360,7 +361,7 @@ loadCast(session) → GET /api/audit/cast?session=… 返回 asciicast NDJSON �
 | GET | `/api/audit/sessions?username=&from_date=&to_date=&offset=&limit=` | self / auditor | 录屏会话列表（按 created_at 倒序）；普通用户 `username` 强制为本人。日期参数命名 `from_date/to_date`，与 cast 的相对秒参数区分 |
 | GET | `/api/audit/meta?session=` | self / auditor | 取 `meta.json`（元数据 + 时间线）；**对 active 会话仍可读** |
 | GET | `/api/audit/cast?session=&t_from=&t_to=` | self / auditor | 取 cast 事件；`t_from/t_to` 为**相对秒**切片，支持大文件分段；**活跃会话（未 Close）返回 `409`** |
-| GET | `/api/audit/download?session=` | auditor | 打包 `meta.json`+`cast.log`（zip）下载取证（`cast.log` 本身即标准 `.cast`，可直接供 asciinema 工具链使用）；**活跃会话（未 Close）返回 `409`** |
+| GET | `/api/audit/download?session=` | auditor | 打包 zip 下载取证：`meta.json` + `<sid>.cast` + **`offline-player.html`**（自包含离线回放页：内联 asciinema-player css/js + cast + 元信息条，解包双击即可离线回放；`cast.log` 本身即标准 `.cast`，亦可直接供 asciinema 工具链使用）；离线页仅在模板存在、cast 可读且 ≤64MB 时附带，否则**静默降级为双文件 zip**；**活跃会话（未 Close）返回 `409`** |
 
 - **无删除端点**：审计数据只读，不提供人工删除能力；清理仅由保留期/总量配额自动执行（§6.2）。
 - **active 会话语义**：`active`（未 Close）会话无完整回放/取证价值，故 `/api/audit/cast` 与 `/api/audit/download` 直接返回 `409 {"error":"active session"}`（在写任何响应体/响应头之前判定）；`/api/audit/meta` 不受影响，保持可读。
@@ -368,6 +369,8 @@ loadCast(session) → GET /api/audit/cast?session=… 返回 asciicast NDJSON �
 - `/api/audit/cast` 默认**原样返回 asciicast NDJSON**（`Content-Type: application/x-asciicast`），同源 URL 可直接交给 asciinema-player 加载，无需前端二次解析。
 - 需要时间窗口/大文件分段时，服务端按 `t_from/t_to` 过滤事件，**并将事件 time 平移 `-t_from`**（窗口内时间从 0 起，`startAt=0` 可播）；可附带窗口起点前最近的 `r` 事件以恢复渲染基准（P2 优化项）。前端以 `{data: <返回文本>}` 内联模式交由 player 播放（**不用 Blob URL**，见 §8.2 CSP 约束）。
 - 时间过滤在服务端做（避免前端拉全量），依赖事件时间为相对秒。
+- **离线取证页（offline-player.html）**：`/api/audit/download` 在 zip 内附带一份自包含离线回放页（`audit/offline.go` 组装：`OfflinePlayerTemplate` 内联 vendored player 的 css/js，`FillOfflinePlayer` 填充 title/元信息/cast），解包双击即可离线回放，无需服务端与登录。装配失败或 cast 超 64MB 护栏时静默降级为双文件 zip。
+- **离线页 XSS 转义设计（§7 同源约束的离线延伸）**：离线页与主站共用「不信任会话数据」前提。① `title` 经 `html.EscapeString`；② `meta`/`cast` 以 `json.Marshal` 输出为 JS 字面量（`const SESSION_META = …;` / `const CAST_DATA = …;`），Go 默认对 `< > &` 做 HTML 转义（`</script>` → `\u003c/script\u003e`），**不会在 `<script>` 上下文内闭合标签**；③ 元信息条渲染一律用 `textContent`（禁 `innerHTML`），杜绝 DOM 注入。占位符 `__WS_*__` 一次性全量替换，最终产物不含残留 token。
 
 ---
 

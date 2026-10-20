@@ -237,9 +237,17 @@ func NewAuditCastHandler(api *AuditAPI) http.HandlerFunc {
 	}
 }
 
+// offlineEmbedMaxCast 是离线页内嵌 cast 的字节上限护栏（64MB）：超过则不内联离线页，
+// 降级为双文件 zip（避免超大 cast 膨胀取证包 / 内存翻倍）。
+const offlineEmbedMaxCast = 64 << 20
+
 // NewAuditDownloadHandler 返回 GET /api/audit/download?session=<sid> 处理函数（仅审计员，
 // 由 RequireAuditor 保证）。打包 meta.json + cast.log 为 zip。
-func NewAuditDownloadHandler(api *AuditAPI) http.HandlerFunc {
+//
+// offlineTemplate 非空时，额外内联一份自包含离线回放页（offline-player.html：内联
+// asciinema-player css/js + cast + 元信息条，解包双击即可离线回放）；模板缺失、cast 读
+// 取失败或超出 offlineEmbedMaxCast 护栏时静默降级为双文件 zip，不报错。
+func NewAuditDownloadHandler(api *AuditAPI, offlineTemplate []byte) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -256,9 +264,18 @@ func NewAuditDownloadHandler(api *AuditAPI) http.HandlerFunc {
 			writeJSON(w, http.StatusConflict, errorResponse{Error: "active session"})
 			return
 		}
+
+		// 尽力装配离线回放页：任一条件不满足则 offlineHTML 保持 nil（降级为双文件 zip）。
+		var offlineHTML []byte
+		if len(offlineTemplate) > 0 {
+			if raw, cerr := api.store.ReadCast(meta.Username, sid); cerr == nil && len(raw) <= offlineEmbedMaxCast {
+				offlineHTML = audit.FillOfflinePlayer(offlineTemplate, sid, *meta, raw)
+			}
+		}
+
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", sid+"-audit.zip"))
-		if err := api.store.Download(meta.Username, sid, w); err != nil {
+		if err := api.store.Download(meta.Username, sid, w, offlineHTML); err != nil {
 			// 响应头可能已写出，无法再改状态码；记录日志即可。
 			log.Printf("audit: download %s: %v", sid, err)
 		}

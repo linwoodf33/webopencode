@@ -8,7 +8,7 @@
 - SHA-256：
   - asciinema-player.js: A13C37632E1B5C49FE9128417B9319A9B5BC64CB457DD5AE52CBBA8A3ACEB880
   - asciinema-player.css: F619FE17597043564F03B2C6918B3DAF890EE8B912FB408542FBA11AFADE4FDB
-- 说明：v3 API AsciinemaPlayer.create(src, el, opts)。协议选毕（本项目合法使用第三方开源组件）。dist 的 min.js 与 css 本身不含 //# sourceMappingURL 注释（0 处），复制后与官方 tarball 逐字节一致。
+- 说明：v3 API AsciinemaPlayer.create(src, el, opts)。协议选毕（本项目合法使用第三方开源组件）。dist 的 min.js 与 css 本身不含 //# sourceMappingURL 注释（0 处），复制后与官方 tarball 逐字节一致。另：审计下载的离线取证页（`offline-player.html`）会按原样内嵌本 js/css（随取证包分发，属开源组件正常分发，许可证见组件来源）。
 
 ## xterm.js（终端前端渲染）
 - 版本：xterm.js 5.5.0（npm 包 @xterm/xterm@5.5.0，据 repository 的 DESIGN_SESSIONS.md:480 记录）；addon-fit.js 对应 @xterm/addon-fit@0.10.0

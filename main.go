@@ -149,7 +149,7 @@ func main() {
 	http.Handle("/api/audit/sessions", requireMgmt(handler.NewAuditSessionsHandler(auditAPI)))
 	http.Handle("/api/audit/meta", requireMgmt(handler.NewAuditMetaHandler(auditAPI)))
 	http.Handle("/api/audit/cast", requireMgmt(handler.NewAuditCastHandler(auditAPI)))
-	http.Handle("/api/audit/download", requireMgmt(handler.RequireAuditor(cfg)(handler.NewAuditDownloadHandler(auditAPI))))
+	http.Handle("/api/audit/download", requireMgmt(handler.RequireAuditor(cfg)(handler.NewAuditDownloadHandler(auditAPI, buildOfflineTemplate()))))
 
 	addr := cfg.Listen // 默认 ":8080"，缺省时由 LoadConfig 补齐
 	// 若显式设置环境变量 PORT，则优先覆盖 config.yaml 的 listen（保持容器化部署向后兼容）。
@@ -174,4 +174,18 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server failed: %v", err)
 	}
+}
+
+// buildOfflineTemplate 读取内嵌的 asciinema-player 资源并组装离线回放页模板。
+//
+// 任一资源缺失即返回 nil，审计下载随之降级为双文件 zip（不阻断下载）；仅告警日志。
+// 模板在进程启动时组装一次，避免每次下载重复读取/拼接大块资源。
+func buildOfflineTemplate() []byte {
+	js, errJS := staticFS.ReadFile("static/vendor/asciinema-player.js")
+	css, errCSS := staticFS.ReadFile("static/vendor/asciinema-player.css")
+	if errJS != nil || errCSS != nil {
+		log.Printf("warn: offline player assets missing (js=%v css=%v); audit download falls back to 2-file zip", errJS, errCSS)
+		return nil
+	}
+	return audit.OfflinePlayerTemplate(js, css)
 }

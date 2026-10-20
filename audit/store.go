@@ -180,7 +180,11 @@ func (s *Store) ReadCast(username, sessionID string) ([]byte, error) {
 }
 
 // Download 将会话的 meta.json + cast.log 打包为 zip 写入 w（cast 命名为 <sid>.cast）。
-func (s *Store) Download(username, sessionID string, w io.Writer) error {
+//
+// offlineHTML 非空时，在 meta.json、<sid>.cast 之后追加第三个条目 offline-player.html
+//（自包含离线回放页，内容 = offlineHTML，Deflate）。offlineHTML 为空则仅打包两文件，
+// 行为与未引入离线页时完全一致（模板缺失/数据异常时的降级路径）。
+func (s *Store) Download(username, sessionID string, w io.Writer, offlineHTML []byte) error {
 	dir, ok := s.sessionDir(username, sessionID)
 	if !ok {
 		return os.ErrNotExist
@@ -196,6 +200,12 @@ func (s *Store) Download(username, sessionID string, w io.Writer) error {
 	if err := addFileToZip(zw, filepath.Join(dir, "cast.log"), sessionID+".cast"); err != nil {
 		_ = zw.Close()
 		return err
+	}
+	if len(offlineHTML) > 0 {
+		if err := addBytesToZip(zw, offlineHTML, "offline-player.html"); err != nil {
+			_ = zw.Close()
+			return err
+		}
 	}
 	return zw.Close()
 }
@@ -613,6 +623,17 @@ func addFileToZip(zw *zip.Writer, src, name string) error {
 		return err
 	}
 	_, err = io.Copy(w, f)
+	return err
+}
+
+// addBytesToZip 将内存字节以 name 加入 zip（Deflate）。
+func addBytesToZip(zw *zip.Writer, data []byte, name string) error {
+	hdr := &zip.FileHeader{Name: name, Method: zip.Deflate}
+	w, err := zw.CreateHeader(hdr)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(data)
 	return err
 }
 

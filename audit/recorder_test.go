@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -849,5 +851,134 @@ func TestRecorderMaxSessionBytes(t *testing.T) {
 	}
 	if fi.Size() > 2000 {
 		t.Fatalf("cast grew unbounded: %d bytes", fi.Size())
+	}
+}
+
+// TestRecorderConcurrentFlushNoRace 回归：多写协程与多 flushOnce 协程并发，
+// 验证写盘互斥（wmu）下 cast.log 结构完好——header 首行唯一、事件无重无丢、
+// 逐行可解析、时间戳非降、事件内容与写入一致。配合 `go test -race` 检出并发写盘竞争。
+func TestRecorderConcurrentFlushNoRace(t *testing.T) {
+	started := time.Now()
+	meta := SessionMeta{SessionID: "race", Username: "alice", Mode: "bash", StartedAt: started}
+	// ticker 设极长以排除其干扰；FlushThreshold=1 令每次 flushOnce 都落盘。
+	opt := Options{RecordInput: true, FlushThreshold: 1, FlushInterval: time.Hour}
+	r, dir := newTestRecorder(t, meta, opt)
+
+	// 受控时钟：固定为 started+2s，确保 flushOnce 立即越过 headerDelayDefault 定
+	// header 并真正写出，从而与并发写盘路径充分交错。（在启动协程前注入，协程只读。）
+	r.now = func() time.Time { return started.Add(2 * time.Second) }
+
+	const (
+		writers    = 6
+		flushers   = 6
+		perWriter  = 50
+		flushIters = 300
+	)
+
+	// 每个写协程独占自己的期望内容，避免共享切片写竞争。
+	expected := make([][]string, writers)
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < perWriter; j++ {
+				s := fmt.Sprintf("w%d-%d", id, j)
+				if j%2 == 0 {
+					r.WriteOutput([]byte(s))
+				} else {
+					r.WriteInput([]byte(s))
+				}
+				expected[id] = append(expected[id], s)
+			}
+		}(i)
+	}
+
+	// 并发反复 flushOnce，制造与写盘路径的交错。
+	var fwg sync.WaitGroup
+	for i := 0; i < flushers; i++ {
+		fwg.Add(1)
+		go func() {
+			defer fwg.Done()
+			for k := 0; k < flushIters; k++ {
+				r.flushOnce()
+			}
+		}()
+	}
+
+	wg.Wait()
+	fwg.Wait()
+	r.Close("done")
+
+	lines := readCastLines(t, dir)
+	if len(lines) == 0 {
+		t.Fatal("no cast lines")
+	}
+
+	// 1) header 恰一行且为首行：首行是 JSON 对象，其余行不以 '{' 开头。
+	if !strings.HasPrefix(strings.TrimSpace(lines[0]), "{") {
+		t.Fatalf("first line must be header json: %s", lines[0])
+	}
+	headerCount := 0
+	for _, ln := range lines {
+		if strings.HasPrefix(strings.TrimSpace(ln), "{") {
+			headerCount++
+		}
+	}
+	if headerCount != 1 {
+		t.Fatalf("want exactly 1 header line, got %d", headerCount)
+	}
+
+	// 3) 逐行 JSON 可解析（含 header）。
+	for i, ln := range lines {
+		var v any
+		if err := json.Unmarshal([]byte(ln), &v); err != nil {
+			t.Fatalf("line %d invalid json: %v (%s)", i, err, ln)
+		}
+	}
+
+	evs := castEvents(t, dir)
+
+	// 2) 事件行数 == 写入事件总数（无重复/无丢失）。
+	total := 0
+	for _, exp := range expected {
+		total += len(exp)
+	}
+	if len(evs) != total {
+		t.Fatalf("event count=%d, want %d", len(evs), total)
+	}
+
+	// 期望内容 → 事件类型（内容唯一，可用作 map 键）。
+	want := make(map[string]string, total)
+	for _, exp := range expected {
+		for j, s := range exp {
+			if j%2 == 0 {
+				want[s] = "o"
+			} else {
+				want[s] = "i"
+			}
+		}
+	}
+
+	// 4) t 单调非降；5) 事件内容与写入内容、类型一致。
+	got := make(map[string]string, len(evs))
+	var prevT float64
+	for i, ev := range evs {
+		if i > 0 && ev.T < prevT {
+			t.Fatalf("cast timestamps must be non-decreasing at %d: %v < %v", i, ev.T, prevT)
+		}
+		prevT = ev.T
+		if w, ok := want[ev.Data]; !ok || w != ev.Type {
+			t.Fatalf("unexpected event at %d: type=%s data=%q", i, ev.Type, ev.Data)
+		}
+		got[ev.Data] = ev.Type
+	}
+	if len(got) != len(want) {
+		t.Fatalf("unique events=%d, want %d", len(got), len(want))
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("event %q: got type %q, want %q", k, got[k], v)
+		}
 	}
 }

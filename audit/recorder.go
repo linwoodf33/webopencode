@@ -171,6 +171,10 @@ type Recorder struct {
 	started                 time.Time
 	now                     func() time.Time
 
+	// wmu 为写盘互斥：串行化对 r.w/r.f 的全部访问，并与 mu 组成固定锁序
+	// wmu→mu（wmu 为外层）。已持有 mu 的临界区严禁再取 wmu（防死锁）。
+	wmu sync.Mutex
+
 	mu            sync.Mutex
 	closed        bool
 	headerFlushed bool
@@ -655,8 +659,9 @@ func (r *Recorder) Event(name string, fields map[string]any) {
 
 // Close 终结录制（幂等）：补 close 事件与 ended_at，flush 全部尾部数据并原子写 meta.json。
 //
-// Close 后任何 Write* 安全丢弃。实现先将 closed 置位并停止 flush goroutine，再由
-// 本协程独占写出 header/pending，保证不含并发写。
+// Close 后任何 Write* 安全丢弃。实现先将 closed 置位并停止 flush goroutine（close(r.done)
+// + wg.Wait() 在 wmu 之外），确保并发 flushOnce 全部退出后，再由本协程取得 wmu 独占写出
+// header/pending 并关闭文件，保证对 r.w/r.f 不含并发写。
 func (r *Recorder) Close(reason string) {
 	// 先把跨块 UTF-8 尾部残留作为 output 落盘，避免丢尾字符。
 	r.flushUTF8Tail()
@@ -693,10 +698,14 @@ func (r *Recorder) Close(reason string) {
 	}
 	r.mu.Unlock()
 
-	// 停止 flush goroutine，随后独占写出。
+	// 停止 flush goroutine（必须发生在取得 wmu 之前）：close(r.done) + wg.Wait()
+	// 确保所有并发 flushOnce 已退出，随后本协程独占 wmu 收尾写出，避免并发写盘。
 	close(r.done)
 	r.wg.Wait()
 
+	// 写盘收尾：wmu 外层串行化，内部提取 meta/header/body/w/f 与写出同处一个临界区，
+	// 保证提取序==写盘序。锁序 wmu→mu（wmu 先取、mu 后取）。
+	r.wmu.Lock()
 	r.mu.Lock()
 	header := r.headerLine
 	r.headerLine = nil
@@ -722,6 +731,8 @@ func (r *Recorder) Close(reason string) {
 		_ = f.Sync()
 		_ = f.Close()
 	}
+	r.wmu.Unlock()
+
 	if err := writeMetaFile(r.metaPath, meta); err != nil {
 		log.Printf("audit: finalize meta %s: %v", r.metaPath, err)
 	}
@@ -853,8 +864,17 @@ func (r *Recorder) decideHeaderLocked() {
 	r.bytesSince += int64(len(r.headerLine))
 }
 
-// flushOnce 执行一次异步落盘：超时定 header → 取出 header/pending → 锁外写出。
+// flushOnce 执行一次异步落盘：超时定 header → 取出 header/pending → 写出。
+//
+// 并发与锁序：整个函数体由 wmu 串行化，对 r.w 的写出是唯一写盘路径之一（另一处为
+// Close 收尾），二者由 wmu 互斥，故不存在对 bufio.Writer r.w 的并发写。锁序固定为
+// wmu→mu：wmu 外层、mu 内层，同一临界区内「提取 header/pending 的顺序」即「写出顺序」，
+// 从而保住 header 首行唯一、事件无重无丢、t 单调非降。写盘（含磁盘 IO）刻意放在 mu
+// 释放之后，避免入队路径被磁盘 IO 阻塞；但它仍处于 wmu 临界区内。
 func (r *Recorder) flushOnce() {
+	r.wmu.Lock()
+	defer r.wmu.Unlock()
+
 	r.mu.Lock()
 	// EVW：周期性（或 wake 时）对超过 hang 兜底时长的 pending 保守结算，避免长期滞留。
 	r.settleHangLocked(r.elapsed())

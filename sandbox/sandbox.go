@@ -898,6 +898,8 @@ func execProgram(cfg *Config) error {
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		"LANG=en_US.utf8",
 		"LC_ALL=en_US.utf8",
+		// 内网已断外网:跳过 models.dev 元数据拉取,否则启动挂 10 秒超时(黑屏)
+		"OPENCODE_DISABLE_MODELS_FETCH=true",
 	}
 
 	// 注入宿主侧以目标用户身份写入的 api_key 环境文件（内容 export KEY='val'）。

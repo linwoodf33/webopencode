@@ -214,7 +214,7 @@ fi
 : > "$ROOT/etc/mtab"
 : > "$ROOT/etc/fstab"
 echo "127.0.0.1 localhost" > "$ROOT/etc/hosts"
-echo "nameserver 8.8.8.8" > "$ROOT/etc/resolv.conf" 2>/dev/null || true
+grep -h "^nameserver" /etc/resolv.conf > "$ROOT/etc/resolv.conf" 2>/dev/null || true
 printf 'root:x:0:0:root:/root:/bin/bash\n' > "$ROOT/etc/shadow" 2>/dev/null || true
 
 echo ">>> 拷贝 locale（消除 setlocale 警告）"

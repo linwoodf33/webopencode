@@ -214,7 +214,7 @@ fi
 : > "$ROOT/etc/mtab"
 : > "$ROOT/etc/fstab"
 echo "127.0.0.1 localhost" > "$ROOT/etc/hosts"
-echo "nameserver 8.8.8.8" > "$ROOT/etc/resolv.conf" 2>/dev/null || true
+grep -h "^nameserver" /etc/resolv.conf > "$ROOT/etc/resolv.conf" 2>/dev/null || true
 printf 'root:x:0:0:root:/root:/bin/bash\n' > "$ROOT/etc/shadow" 2>/dev/null || true
 
 echo ">>> 拷贝 locale（目录式；RHEL 通常无 locale-archive）"
@@ -224,6 +224,33 @@ for d in C.utf8 en_US.utf8 en_US; do
   [ -e "/usr/lib/locale/$d" ] && cp -a "/usr/lib/locale/$d" "$ROOT/usr/lib/locale/" 2>/dev/null || true
 done
 [ -e /usr/lib/locale/locale.alias ] && cp -a /usr/lib/locale/locale.alias "$ROOT/usr/lib/locale/" 2>/dev/null || true
+
+echo ">>> Python 3.11 环境（二进制 + libpython + 标准库 + site-packages）"
+if [ -e /usr/bin/python3.11 ]; then
+  rm -f "$ROOT/usr/bin/python3" "$ROOT/usr/bin/python"   # 清掉指向 /etc/alternatives 的悬空链
+  cp -a /usr/bin/python3.11 "$ROOT/usr/bin/"
+  ln -sfn python3.11 "$ROOT/usr/bin/python3"
+  ln -sfn python3.11 "$ROOT/usr/bin/python"
+  cp -a /usr/lib64/libpython3.11.so.1.0 "$ROOT/usr/lib64/" 2>/dev/null || true
+  [ -e /usr/lib64/python3.11 ] && cp -a /usr/lib64/python3.11 "$ROOT/usr/lib64/"
+fi
+
+echo ">>> Python 3.12 环境（整目录 /opt/python3.12 含 pip，与宿主同布局；默认命令链指向 3.12）"
+if [ -e /opt/python3.12 ]; then
+  cp -a /opt/python3.12 "$ROOT/opt/"
+  ln -sfn /opt/python3.12/bin/python3.12 "$ROOT/usr/bin/python3.12"
+  ln -sfn /opt/python3.12/bin/pip3.12 "$ROOT/usr/bin/pip3.12"
+  rm -f "$ROOT/usr/bin/python3" "$ROOT/usr/bin/python" "$ROOT/usr/bin/pip3" "$ROOT/usr/bin/pip"
+  ln -sfn python3.12 "$ROOT/usr/bin/python3"    # 默认 python = 3.12
+  ln -sfn python3.12 "$ROOT/usr/bin/python"
+  ln -sfn /opt/python3.12/bin/pip3.12 "$ROOT/usr/bin/pip3"   # 默认 pip = 3.12 的
+  ln -sfn /opt/python3.12/bin/pip3.12 "$ROOT/usr/bin/pip"
+  cp /etc/pip.conf "$ROOT/etc/pip.conf"   # 全局 pip 源=内网 pypi(10.195.116.123:8081)
+  # python 扩展的系统运行库(ctypes/curses 等;ldd 对 python 启动器不可见,必须显式拷)
+  for lib in /usr/lib64/libffi.so.6* /usr/lib64/libncursesw.so.6* /usr/lib64/libpanelw.so.6*; do
+    cp -a $lib "$ROOT/usr/lib64/" 2>/dev/null || true
+  done
+fi
 
 echo ">>> 去除 setuid/setgid 位（沙箱内不允许提权）"
 find "$ROOT" -perm -4000 -type f -exec chmod -s {} + 2>/dev/null || true

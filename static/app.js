@@ -432,6 +432,13 @@
     myWs.onopen = function () {
       if (!isCurrent()) return;
       term.writeln("\x1b[32m[connected]\x1b[0m");
+      // 重连状态重同步：服务端 TUI 仍认为处于备用缓冲（1049h 随旧页面丢失），
+      // 其开启的鼠标上报模式（1000/1002/1003/1006）同样随旧页面丢失。
+      // 先补齐缓冲对齐与鼠标模式，再由 jitterResizeRedraw 触发 TUI 全量重绘。
+      if (isAttachEntry && currentMode !== "bash") {
+        term.write("\x1b[?1049h");
+        term.write("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h");
+      }
       sendResize();
       jitterResizeRedraw();   // 新增
     };

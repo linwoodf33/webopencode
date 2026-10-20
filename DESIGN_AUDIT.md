@@ -369,7 +369,7 @@ loadCast(session) → GET /api/audit/cast?session=… 返回 asciicast NDJSON �
 - `/api/audit/cast` 默认**原样返回 asciicast NDJSON**（`Content-Type: application/x-asciicast`），同源 URL 可直接交给 asciinema-player 加载，无需前端二次解析。
 - 需要时间窗口/大文件分段时，服务端按 `t_from/t_to` 过滤事件，**并将事件 time 平移 `-t_from`**（窗口内时间从 0 起，`startAt=0` 可播）；可附带窗口起点前最近的 `r` 事件以恢复渲染基准（P2 优化项）。前端以 `{data: <返回文本>}` 内联模式交由 player 播放（**不用 Blob URL**，见 §8.2 CSP 约束）。
 - 时间过滤在服务端做（避免前端拉全量），依赖事件时间为相对秒。
-- **离线取证页（offline-player.html）**：`/api/audit/download` 在 zip 内附带一份自包含离线回放页（`audit/offline.go` 组装：`OfflinePlayerTemplate` 内联 vendored player 的 css/js，`FillOfflinePlayer` 填充 title/元信息/cast），解包双击即可离线回放，无需服务端与登录。装配失败或 cast 超 64MB 护栏时静默降级为双文件 zip。
+- **离线取证页（offline-player.html）**：`/api/audit/download` 在 zip 内附带一份自包含离线回放页（`audit/offline.go` 组装：`OfflinePlayerTemplate` 内联 vendored player 的 css/js，`FillOfflinePlayer` 填充 title/元信息/cast），解包双击即可离线回放，无需服务端与登录。装配失败或 cast 超 64MB 护栏时静默降级为双文件 zip。离线页容器为响应式（`width:100%` / `max-width:1000px` 居中，正文自适应），播放器随窗口大小缩放，与在线回放体验一致。
 - **离线页 XSS 转义设计（§7 同源约束的离线延伸）**：离线页与主站共用「不信任会话数据」前提。① `title` 经 `html.EscapeString`；② `meta`/`cast` 以 `json.Marshal` 输出为 JS 字面量（`const SESSION_META = …;` / `const CAST_DATA = …;`），Go 默认对 `< > &` 做 HTML 转义（`</script>` → `\u003c/script\u003e`），**不会在 `<script>` 上下文内闭合标签**；③ 元信息条渲染一律用 `textContent`（禁 `innerHTML`），杜绝 DOM 注入。占位符 `__WS_*__` 一次性全量替换，最终产物不含残留 token。
 
 ---

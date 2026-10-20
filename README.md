@@ -22,6 +22,7 @@
 - **以目标用户身份运行**：沙箱模式（`sandbox.enabled=true`）下通过 `sudo -n -u root sandbox-init` 启动沙箱，沙箱内进程以**真实用户身份**（含补充组）运行；非沙箱模式（`sandbox.enabled=false`）退回传统 `sudo -n -u <user> -i bash` 切换登录用户，确保文件归属与权限正确。
 - **终端字号调整**：终端工具条提供 `A-`/`A+` 按钮调整字号（8–32px，步进 2px），选择持久化到 `localStorage`，下次登录自动恢复。
 - **终端主题切换**：工具条下拉框内置 8 个流行主题（VS Code Dark、Dracula、Monokai、Nord、Solarized Dark、One Dark、Tokyo Night、GitHub Light），实时切换并持久化，下次登录自动恢复。
+- **终端剪贴板与快捷键**：选中文本后**鼠标右键=复制**（复制后自动取消选中）；**Ctrl+V 粘贴**（浏览器原生粘贴，http/https 通用）；**Ctrl+C 仍为中断信号**（SIGINT，不拦截为复制）。opencode/codex 等全屏 TUI 应用内选中复制经 **OSC 52** 序列直接写入系统剪贴板。
 - **刷新保持会话**：页面刷新或短暂断线后自动重连到同一终端，正在运行的进程不丢失（详见「会话模式与会话行为」）。
 - **沙箱隔离**（user namespace 方案 A）：通过 `sudo -n -u root sandbox-init` 启动沙箱，mount/PID/net namespace + pivot_root + 只读 rootfs + cgroup + seccomp；沙箱内进程以**宿主真实用户身份**运行（保留补充组，非 root、非 userns root），解决 NFS 丢失补充组导致的 Permission denied 问题。
 - **bind_mounts 支持**：NFS 等宿主已挂载路径可 bind 进沙箱（简单列表或 source/target 对象形式）。
